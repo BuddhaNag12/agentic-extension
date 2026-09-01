@@ -30,9 +30,25 @@ export const HandshakeResult = z.object({
 export const CreateRunParams = z.object({
   ticketKey: z.string(),
   summary: z.string().optional(),
+  /** Workflow name (§21). Falls back to the configured default. */
+  workflow: z.string().optional(),
   profile: PipelineProfile.optional(),
   baseRef: z.string().optional(),
 });
+
+export const ListWorkflowsResult = z.object({
+  workflows: z.array(z.object({
+    name: z.string(),
+    displayName: z.string().optional(),
+    description: z.string(),
+    builtIn: z.boolean(),
+    runnable: z.boolean(),
+    agents: z.record(z.string(), z.object({ model: z.string(), effort: z.string() })),
+    issues: z.array(z.object({ rule: z.string(), severity: z.string(), message: z.string() })),
+    path: z.string().optional(),
+  })),
+});
+export type ListWorkflowsResult = z.infer<typeof ListWorkflowsResult>;
 export const CreateRunResult = z.object({ run: Run });
 
 export const RunIdParams = z.object({ runId: RunId });
@@ -71,6 +87,7 @@ export const Methods = {
   answerQuestion: 'hitl/answer',
   decideApproval: 'hitl/decide',
   listPending: 'hitl/pending',
+  listWorkflows: 'workflow/list',
 } as const;
 
 // --- notifications (orchestrator → extension) ------------------------------

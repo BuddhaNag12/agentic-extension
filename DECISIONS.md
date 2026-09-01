@@ -118,3 +118,49 @@ An agent asking a question calls the broker, which applies the §7.2 cap and the
 `alreadyChecked` requirement and *may refuse*. Only an accepted question is
 written to the event log. Logging first would make the cap unenforceable, since
 the UI renders from the log.
+
+## Decisions made building M1's foundation
+
+### D13 — A "profile that skips Q&A" keeps its phase and its gate
+
+§5.10 says `chore` and `refactor` skip clarify. Taken literally that drops G1
+with it, which collides with D1's three mandatory gates — and W6 caught the
+contradiction the first time the built-in workflows were validated.
+
+The resolution: those workflows keep the `clarify` phase and set
+`maxQuestionsPerPhase: 0`. The phase runs, asks nothing, records its assumptions,
+and presents the spec for a fast confirmation. What a chore skips is the
+*questions*, not the *gate* — which is what §5.10's parenthetical "(unless
+questions are blocking)" was already pointing at.
+
+### D14 — The workflow definition is the only source of pipeline shape
+
+`PipelineOptions` used to be `{profile, waitForCi}` with a `PROFILES` table in
+`core`, duplicating what the workflow files now say. It is now
+`{skip, waitForCi, forceClarify?}`, projected from a workflow by
+`pipelineOptionsFor()`. Two places defining which phases exist is exactly the
+kind of drift that produces a run whose UI and state machine disagree.
+
+### D15 — Gates resolve binaries from `node_modules/.bin`, never `npx`
+
+`npx tsc` in a project without TypeScript installed fetches a **decoy package**
+of that name from the registry and runs it — and once cached, `--no-install`
+serves it too. A gate would then execute code the repo never depended on and
+report a stranger's exit code as the build result.
+
+Adapters resolve `node_modules/.bin/<tool>` and fall back to PATH, and `detect()`
+requires the local package to be present. A repo without the toolchain simply
+does not have that gate, which is the honest answer.
+
+### D16 — A gate that could not run is a failure, never a pass
+
+A missing binary, a timeout, or non-zero exit with unparseable output all
+produce a failing `GateReport` with a specific reason. Returning "no failures"
+for a gate that never executed is the precise shape of the false green §16.3
+names as the trust metric.
+
+### D17 — The failure signature covers the whole set, not the reported slice
+
+Only the top 20 failures reach a model (§5 Stage 7), but the §9.1 signature
+hashes all of them. Signing the truncated slice would make fixing failure 21
+look like zero progress, and the repair loop would escalate on phantom thrash.

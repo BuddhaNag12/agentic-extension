@@ -1,0 +1,13 @@
+{
+  "name": "@agentflow/gates",
+  "version": "0.0.1",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": { "build": "tsc -b" },
+  "dependencies": {
+    "@agentflow/core": "0.0.1",
+    "@agentflow/protocol": "0.0.1"
+  }
+}

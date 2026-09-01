@@ -4,7 +4,7 @@ A ticket goes in. A reviewed, tested, green pull request comes out — with a
 human approving at three defined points and able to interrupt at any point.
 
 Implementation of [agentflow-architecture.md](agentflow-architecture.md).
-**Current state: M0 (skeleton) complete.**
+**Current state: M0 complete; M1's deterministic foundation in place.**
 
 > **The model proposes; the runner decides.** No phase advances because an agent
 > said it was finished. A phase advances because a gate — a deterministic
@@ -24,11 +24,22 @@ exercised end to end before a single model call exists.
 - Run state machine with the §5 transitions, three human gates, loop limits
   and escalation
 - Runs tree, inbox, status bar, and a live run-detail timeline
-- 56 tests: state machine, replay (including a property test), failure
-  signatures, concurrency, and a daemon integration test over the real socket
+**Real and tested, no credentials needed:**
 
-Not yet real: model calls, git worktrees, gate execution, Jira/Figma/GitHub.
-Those are M1 and M2.
+- **Workflows** (§21) — named YAML definitions with per-role model bindings, the
+  W1–W8 validator, inheritance, and the five built-ins expressed as definitions
+- **Git worktrees** (§4.1) — one isolated tree per run in a sibling directory,
+  base-ref resolution, checkpoints, commit trailers, and the §13.2 resume guard
+- **Gates** (§12.2) — the adapter interface, a Node/TypeScript adapter set with
+  real parsers, and a runner that fails fast and refuses to call a gate green
+  when the tool never ran
+
+- 133 tests: state machine, replay (including a property test), failure
+  signatures, concurrency, workflow validation, real git worktrees, real gate
+  execution, and a daemon integration test over the real socket
+
+Not yet real: model calls, Jira/Figma/GitHub. Those need credentials and are
+the rest of M1.
 
 ## Layout
 
@@ -36,7 +47,8 @@ Those are M1 and M2.
 |---|---|---|
 | `protocol` | zod schemas, RPC contract — single source of truth | anything |
 | `core` | domain model, state machine, event log, replay | `vscode`, the Agent SDK |
-| `orchestrator` | daemon: scheduling, gates, brokers, persistence | `vscode` |
+| `gates` | gate adapters, parsers, the fail-fast runner | `vscode`, the Agent SDK |
+| `orchestrator` | daemon: scheduling, worktrees, brokers, persistence | `vscode` |
 | `extension` | VS Code host: activation, commands, views | — |
 | `webview` | dashboard React app (M3) | — |
 
@@ -66,16 +78,27 @@ set `AGENTFLOW_FAKE_TIME_SCALE=0.1` in the environment before launching.
 - Failure signatures (§9.1) — [signature.ts](packages/core/src/signature.ts)
 - Split semaphores (§4.3) — [scheduler.ts](packages/orchestrator/src/scheduler.ts)
 - Question and approval broker (§7) — [hitl.ts](packages/orchestrator/src/hitl.ts)
+- Workflow schema and W1–W8 validator (§21) — [validate.ts](packages/core/src/workflow/validate.ts), [loader.ts](packages/core/src/workflow/loader.ts)
+- Worktrees (§4.1, §13.2) — [worktree.ts](packages/orchestrator/src/git/worktree.ts)
+- Gate ladder and parsers (§12) — [runner.ts](packages/gates/src/runner.ts), [node.ts](packages/gates/src/adapters/node.ts)
 
 Decisions taken while building this, including the six open questions from
 §20, are recorded in [DECISIONS.md](DECISIONS.md).
 
-## Next: M1
+## Next: the rest of M1
 
-A single-ticket vertical slice — Jira read, two harvest subagents, spec, plan,
-manual decompose, one implemented task, compile + unit gates, a real commit
-and a pushed branch, one real worktree.
+What is left needs credentials: a Jira adapter reading a real ticket, the
+agent-runtime wrapper around the Claude Agent SDK, and the harvest/spec/plan
+phases calling real models. The deterministic pieces those plug into — the
+workflow that configures them, the worktree they write in, and the gates that
+judge them — are done and tested.
 
 The exit criterion is the one that matters: **one real, simple ticket becomes a
 real PR.** Do not proceed to M2 until that is genuinely useful on a real
 ticket, not a toy one.
+
+To set up credentials when you are ready:
+
+```bash
+export ANTHROPIC_API_KEY=...   # or run: ant auth login
+```

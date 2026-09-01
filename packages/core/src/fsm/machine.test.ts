@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import type { PipelineOptions } from './profiles.js';
+import { pipelineOptionsFor, type PipelineOptions } from './profiles.js';
 import { PLAN_VALIDATION_LIMIT, RE_SPEC_LIMIT, initialState, transition, type MachineState } from './machine.js';
 import type { Trigger } from './triggers.js';
+import { BUILT_IN_WORKFLOWS } from '../workflow/builtins.js';
 
-const feature: PipelineOptions = { profile: 'feature', waitForCi: false };
-const chore: PipelineOptions = { profile: 'chore', waitForCi: false };
-const spike: PipelineOptions = { profile: 'spike', waitForCi: false };
+const optionsFor = (name: string): PipelineOptions =>
+  pipelineOptionsFor(BUILT_IN_WORKFLOWS.find((w) => w.name === name)!);
+
+const feature = optionsFor('feature');
+const spike = optionsFor('spike');
+/** A pipeline that genuinely omits clarify, to exercise the skip path. */
+const noClarify: PipelineOptions = { skip: ['clarify'], waitForCi: false };
 
 /** Drive the machine, asserting every step is legal. */
 function drive(state: MachineState, triggers: Trigger[], opts = feature): MachineState {
@@ -60,15 +65,22 @@ describe('happy path', () => {
 });
 
 describe('profiles (§5.10)', () => {
-  it('chore skips clarify and its gate', () => {
-    const s = drive(initialState(), [{ kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' }], chore);
+  it('a pipeline that omits clarify goes straight to plan', () => {
+    const s = drive(initialState(), [{ kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' }], noClarify);
     expect(s.phase).toBe('plan');
   });
 
-  it('forceClarify pulls the gate back in when a blocking question appears', () => {
-    const opts: PipelineOptions = { ...chore, forceClarify: true };
+  it('forceClarify pulls the phase back in when a blocking question appears', () => {
+    const opts: PipelineOptions = { ...noClarify, forceClarify: true };
     const s = drive(initialState(), [{ kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' }], opts);
     expect(s.phase).toBe('clarify');
+  });
+
+  it('chore keeps clarify and G1 — it skips the questions, not the gate', () => {
+    const chore = BUILT_IN_WORKFLOWS.find((w) => w.name === 'chore')!;
+    expect(chore.pipeline.skip).not.toContain('clarify');
+    expect(chore.hitl.gates).toEqual(['G1', 'G2', 'G3']);
+    expect(chore.hitl.maxQuestionsPerPhase).toBe(0);
   });
 
   it('spike reaches done without ever entering implement, verify or ship', () => {

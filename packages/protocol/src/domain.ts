@@ -212,6 +212,8 @@ export const Run = z.object({
   repo: RepoRef,
   worktree: z.string(),
   branch: z.string(),
+  /** Name of the workflow (§21) that selects this run's phases, gates and agents. */
+  workflow: z.string().default('feature'),
   phase: Phase,
   status: RunStatus,
   attemptBudget: AttemptBudget,

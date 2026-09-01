@@ -4,3 +4,6 @@ export * from './fsm/machine.js';
 export * from './fsm/profiles.js';
 export * from './fsm/triggers.js';
 export * from './signature.js';
+export * from './workflow/builtins.js';
+export * from './workflow/loader.js';
+export * from './workflow/validate.js';

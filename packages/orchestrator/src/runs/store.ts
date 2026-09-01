@@ -2,8 +2,9 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
-  EventLog, initialState, replay, transition,
-  type Effect, type MachineState, type PipelineOptions, type ReplayState, type Trigger,
+  EventLog, initialState, loadWorkflows, pipelineOptionsFor, replay, transition,
+  type Effect, type LoadResult, type MachineState, type PipelineOptions,
+  type ReplayState, type Trigger,
 } from '@agentflow/core';
 import type { NewRunEvent, PipelineProfile, Run, RunEvent } from '@agentflow/protocol';
 import { runDir, runEventLogPath, runSnapshotPath, type WorkspacePaths } from '../paths.js';
@@ -20,9 +21,13 @@ export interface RunHandle {
 export interface CreateRunInput {
   ticketKey: string;
   summary?: string;
+  /** Workflow name (§21). Defaults to `feature`. */
+  workflow?: string;
   profile?: PipelineProfile;
   baseRef?: string;
 }
+
+export const DEFAULT_WORKFLOW = 'feature';
 
 /**
  * Owns every run in a workspace: their event logs, machine state, and the
@@ -32,9 +37,33 @@ export interface CreateRunInput {
 export class RunStore extends EventEmitter {
   private readonly runs = new Map<string, RunHandle>();
 
+  private loaded: LoadResult;
+
   constructor(private readonly paths: WorkspacePaths) {
     super();
     this.setMaxListeners(64);
+    this.loaded = loadWorkflows(paths.agentflowDir);
+  }
+
+  /** Re-read `.agentflow/workflows` — called when a definition changes on disk. */
+  reloadWorkflows(): LoadResult {
+    this.loaded = loadWorkflows(this.paths.agentflowDir);
+    this.emit('workflowsChanged');
+    return this.loaded;
+  }
+
+  get workflows(): LoadResult {
+    return this.loaded;
+  }
+
+  /**
+   * The pipeline shape for a run. An unknown or unrunnable workflow falls back
+   * to the default rather than throwing — a bad definition should not make an
+   * existing run unresumable.
+   */
+  private optionsFor(name: string): PipelineOptions {
+    const entry = this.loaded.workflows.get(name) ?? this.loaded.workflows.get(DEFAULT_WORKFLOW);
+    return entry ? pipelineOptionsFor(entry.resolved) : { skip: [], waitForCi: false };
   }
 
   list(): Run[] {
@@ -53,6 +82,7 @@ export class RunStore extends EventEmitter {
 
   create(input: CreateRunInput): RunHandle {
     const id = randomUUID();
+    const workflow = input.workflow ?? DEFAULT_WORKFLOW;
     const profile = input.profile ?? 'feature';
     const branch = `agentflow/${input.ticketKey}`;
     const now = Date.now();
@@ -77,6 +107,7 @@ export class RunStore extends EventEmitter {
       // nested worktrees confuse build tooling that resolves from the root.
       worktree: `${this.paths.root}-agentflow/${input.ticketKey}`,
       branch,
+      workflow,
       phase: 'intake',
       status: 'queued',
       attemptBudget: { perTask: 4, perRun: 12, maxUsd: 8, maxWallClockMin: 90 },
@@ -93,7 +124,7 @@ export class RunStore extends EventEmitter {
       run,
       machine: initialState(),
       log,
-      options: { profile, waitForCi: false },
+      options: this.optionsFor(workflow),
       derived: replay([]),
     };
     this.runs.set(id, handle);
@@ -186,6 +217,7 @@ export class RunStore extends EventEmitter {
         repo: { id: 'default', path: this.paths.root, baseRef: 'origin/main' },
         worktree: `${this.paths.root}-agentflow/${created.ticketKey}`,
         branch: created.branch,
+        workflow: DEFAULT_WORKFLOW,
         phase: derived.phase,
         status: derived.status,
         attemptBudget: { perTask: 4, perRun: 12, maxUsd: 8, maxWallClockMin: 90 },
@@ -202,7 +234,7 @@ export class RunStore extends EventEmitter {
         run,
         machine: { ...initialState(), phase: derived.phase, status: derived.status },
         log,
-        options: { profile: 'feature', waitForCi: false },
+        options: this.optionsFor(DEFAULT_WORKFLOW),
         derived,
       });
       restored += 1;

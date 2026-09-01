@@ -131,6 +131,7 @@ export class Orchestrator {
       const handle = this.store.create({
         ticketKey: p.ticketKey,
         ...(p.summary ? { summary: p.summary } : {}),
+        ...(p.workflow ? { workflow: p.workflow } : {}),
         ...(p.profile ? { profile: p.profile } : {}),
         ...(p.baseRef ? { baseRef: p.baseRef } : {}),
       });
@@ -193,6 +194,24 @@ export class Orchestrator {
     });
 
     c.onRequest(Methods.listPending, () => this.pendingPayload());
+
+    c.onRequest(Methods.listWorkflows, () => {
+      const { workflows } = this.store.reloadWorkflows();
+      return {
+        workflows: [...workflows.values()].map((w) => ({
+          name: w.definition.name,
+          ...(w.definition.displayName ? { displayName: w.definition.displayName } : {}),
+          description: w.definition.description,
+          builtIn: w.definition.builtIn,
+          runnable: w.runnable,
+          agents: Object.fromEntries(
+            Object.entries(w.resolved.agents).map(([role, b]) => [role, { model: b!.model, effort: b!.effort }]),
+          ),
+          issues: w.issues.map((i) => ({ rule: i.rule, severity: i.severity, message: i.message })),
+          ...(w.path ? { path: w.path } : {}),
+        })),
+      };
+    });
 
     c.onRequest(Methods.shutdown, () => {
       setTimeout(() => this.shutdown(), 50);
