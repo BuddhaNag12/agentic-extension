@@ -540,6 +540,12 @@ Not every ticket deserves all eleven stages. Profiles select which stages run an
 
 The profile is chosen at intake and can be overridden by the human at Gate 1.
 
+These five ship as **workflow definitions**, not as code. §21 generalizes the
+profile into a named, committed workflow that also binds a model to each role,
+selects gates and budgets, and can be authored by a team for its own ticket
+types. Everything in this table is expressible in that format, and the built-ins
+are loaded by the same code path as a user-authored workflow.
+
 ---
 
 ## 6. Multi-agent topology
@@ -559,6 +565,12 @@ The profile is chosen at intake and can be overridden by the human at Gate 1.
 | Summarizer | Haiku | none | ephemeral | off |
 
 Model IDs are configuration, not code. Ship with a defaults file mapping tier → model string and validate at startup against `query().supportedModels()`, so a model rename never bricks the extension.
+
+This table is the **default** binding. Each workflow overrides it per role — a
+payments hotfix may want `fable` on review where a chore wants `sonnet` — and
+the alias catalogue, the per-role `effort` setting and the validation rules are
+in §21.3–§21.4. The one row that is not configurable is the verifier: it has no
+model, and a workflow that tries to give it one is rejected.
 
 ### 6.2 Subagent vs. new session — the decision rule
 
@@ -1171,7 +1183,33 @@ Figma MCP; design-reader; DesignSpec; token conformance checks; screenshot gate;
 Security controls end-to-end; org policy file; secret redaction; OTel; cost governance UI; chaos tests; docs; packaging and signing.
 **Exit:** pilot-ready for a team that is not you.
 
-Roughly 4–5 months for one strong engineer, 2.5–3 with two. The estimate is dominated by M2 and M4 — the correctness engine and the eval harness are where the real work lives, and they are exactly the parts that look skippable from the outside.
+### M7 — Workflows and configuration (2–3 weeks)
+Workflow schema and loader (§21); the five built-ins re-expressed as definitions;
+per-role agent binding with the alias catalogue and startup validation; workflow
+validation rules W1–W8; the workflows view; settings view with Claude and Jira
+connection tests; usage view folding the existing `cost` events.
+**Exit:** a team authors its own named workflow, binds a different model to
+review than to implementation, and the usage view attributes the resulting spend
+by role — with a workflow that tries to loosen `policy.json` rejected on save.
+
+*Placed after M6 deliberately.* Configuration surface is only worth building
+once the thing being configured is known to work; a settings UI over an unproven
+pipeline is a way to make the wrong thing adjustable. The one piece to pull
+earlier is the **workflow schema itself** — landing it in M1 costs little and
+saves re-expressing five hardcoded profiles later.
+
+### M8 — Review window and chat side channel (2 weeks)
+The four-pane Gate 3 review window (§23.5); inline comment → repair task; the
+`@agentflow` chat participant for status, steering and approval (§23.6), routed
+through the same broker as every other decision.
+**Exit:** a full Gate 3 review is completed without leaving the review window,
+and the same gate can be approved from chat with the audit bundle recording
+which surface decided it.
+
+Roughly 4–5 months for one strong engineer to reach M6, 2.5–3 with two; M7 and
+M8 add about a month. The estimate is dominated by M2 and M4 — the correctness
+engine and the eval harness are where the real work lives, and they are exactly
+the parts that look skippable from the outside.
 
 ---
 
@@ -1203,6 +1241,408 @@ Roughly 4–5 months for one strong engineer, 2.5–3 with two. The estimate is 
 
 ---
 
+---
+
+## 21. Workflows as first-class, named configuration
+
+### 21.1 Profiles become workflows
+
+§5.10 shipped five fixed pipeline profiles compiled into the code. That is the
+wrong shape for a tool a team adopts: the interesting variation between "how we
+do a payments bug" and "how we do a design-system chore" is not new code, it is
+different phases, different gates, and **different models on different roles**.
+
+So `PipelineProfile` is generalized into a **Workflow**: a named, versioned,
+committed definition that selects phases, gates, agent bindings, budgets and
+guardrails. The five built-ins ship as definitions, not as branches in a switch
+statement, and a user-authored workflow is loaded by exactly the same code path.
+There are no privileged built-ins.
+
+```
+.agentflow/
+  workflows/
+    feature.yaml            # built-in, materialized on first run so it is readable
+    bug.yaml
+    chore.yaml
+    refactor.yaml
+    spike.yaml
+    payments-hotfix.yaml    # user-authored, committed, reviewed in a PR
+```
+
+Committed and reviewable is the point. A workflow file is where model spend,
+gate strictness and autonomy live; those are team decisions and belong in a
+pull request, not in one engineer's user settings.
+
+### 21.2 Workflow definition
+
+```yaml
+name: payments-hotfix
+displayName: Payments — hotfix
+description: Fast path for production payment defects. Repro test required.
+extends: bug                  # inherit, then override; omit for a bare workflow
+schemaVersion: "1.0.0"
+
+pipeline:
+  skip: [clarify]             # only where the profile genuinely does not need it
+  waitForCi: true             # §20.3 — CI is the pre-ship truth
+  gates:
+    required: [compile, lint, unit, coverage, secretscan, repro_test]
+    coverageThreshold: 0.9
+
+agents:                       # §21.3 — the cost and quality lever
+  triage:      { model: haiku,  effort: low }
+  harvest:     { model: sonnet, effort: low, subagents: [repo-cartographer, test-cartographer, history-archaeologist] }
+  analyst:     { model: opus,   effort: high,  thinking: adaptive }
+  planner:     { model: opus,   effort: xhigh, thinking: adaptive }
+  implementer: { model: sonnet, effort: medium }
+  repair:      { model: sonnet, effort: medium, escalateTo: opus }
+  reviewer:    { model: fable,  effort: xhigh, thinking: adaptive }
+  summarizer:  { model: haiku,  effort: low }
+
+budgets:
+  perRunUsd: 12
+  perTicketMinutes: 60
+  attemptsPerTask: 4
+  taskBudgetTokens: 64000     # advisory pacing signal, not a hard cap — §21.6
+
+guardrails:
+  forbiddenPaths: ["**/*.pem", "**/local.properties", ".github/**"]
+  maxFilesTouched: 25
+  allowDependencyChanges: false
+
+hitl:
+  gates: [G1, G2, G3]         # a workflow may not remove a gate the policy requires
+  maxQuestionsPerPhase: 5
+```
+
+### 21.3 Per-role agent binding
+
+This is the feature that most changes what the tool costs and how good it is.
+§6.1 fixed a role→tier mapping globally; here every workflow binds its own.
+
+| Field | Meaning |
+|---|---|
+| `model` | An **alias** from the catalogue (§21.4), never a raw model ID |
+| `effort` | `low` \| `medium` \| `high` \| `xhigh` \| `max` — thinking depth and token spend |
+| `thinking` | `adaptive` or `off`. Adaptive is the only on-mode on current models |
+| `escalateTo` | Model to switch to on the §9.2 escalation ladder's rung 3 |
+| `subagents` | For `harvest` and `reviewer`: which passes actually run |
+
+Two rules that carry the weight:
+
+- **Roles, not phases, bind models.** A phase can run several roles; a role has
+  one job and one sensible tier. Binding at the phase level produces
+  configurations where the reviewer and the implementer share a model, which is
+  precisely the pairing §5 Stage 9 tells you to avoid.
+- **The verifier has no model, and cannot be given one.** `agents.verifier` is
+  rejected at validation. Verification is deterministic (§5 Stage 7); making it
+  configurable would let a workflow author quietly reintroduce the failure mode
+  the whole design exists to prevent.
+
+### 21.4 The model catalogue
+
+Workflow files name an alias. The catalogue resolves aliases to model IDs and
+is the only place a raw ID appears, so a model rename is a one-file change.
+
+| Alias | Model ID | Context | Input $/MTok | Output $/MTok | Where it earns its cost |
+|---|---|---|---|---|---|
+| `fable` | `claude-fable-5` | 1M | $10 | $50 | Hardest review and planning; long-horizon agentic work |
+| `opus` | `claude-opus-5` | 1M | $5 | $25 | Spec, plan, review — the default for judgement |
+| `sonnet` | `claude-sonnet-5` | 1M | $2 | $10 | Implementation and repair — the workhorse |
+| `haiku` | `claude-haiku-4-5` | 200K | $1 | $5 | Triage, summaries, deduplication |
+
+Notes that matter for configuration, not just for the table:
+
+- **Validate at startup, refuse to guess.** Resolve every alias used by every
+  loaded workflow against the runtime's supported-model list on activation. An
+  unresolvable alias blocks *that workflow* with a specific message; it must not
+  fail at turn 40 of a run, and it must not silently substitute a model.
+- **Thinking is adaptive or nothing.** `budget_tokens` is gone on every model in
+  the catalogue. Depth is controlled by `effort`. A workflow written against the
+  old fixed-budget idea is rejected at load with a pointer to `effort`.
+- **`fable` carries a data-residency constraint.** Claude Fable 5 requires
+  30-day retention and is unavailable under zero-data-retention. In a regulated
+  repo that is a policy question, not a preference — so `policy.json` can
+  forbid an alias outright (§22.1) and the workflow validator enforces it.
+- **Effort is the first cost lever, before model choice.** Lower effort on a
+  stronger model frequently beats higher effort on a weaker one, and it keeps
+  one cache namespace instead of two — caches are model-scoped, so a mixed-model
+  workflow forfeits reuse across the models it mixes (§15.4).
+
+### 21.5 Authoring a workflow
+
+Three entry points, all producing the same validated artifact:
+
+1. **Duplicate and edit** — the common case. Right-click a workflow in the
+   workflows view (§23.2) → *Duplicate*, name it, edit the YAML.
+2. **From a run** — *Save this run's configuration as a workflow*. Captures what
+   was actually used, which is how good workflows get discovered.
+3. **From scratch** — a scaffold with every field commented.
+
+A user-authored workflow is validated on save and on load:
+
+| # | Rule | Failure |
+|---|---|---|
+| W1 | Schema-valid; `name` unique and a valid slug | reject |
+| W2 | `extends` resolves, no inheritance cycle | reject |
+| W3 | Every model alias resolves in the catalogue | block that workflow |
+| W4 | `agents.verifier` absent | reject |
+| W5 | Gates listed in `policy.json.requiredGates` are present | reject |
+| W6 | Human gates are a superset of `policy.json.maxAutonomy` | reject |
+| W7 | `forbiddenPaths` is a superset of the policy's | reject |
+| W8 | Skipped phases leave a coherent pipeline (no gate on a skipped phase) | reject |
+
+W5–W7 are the important ones: **a workflow can only be stricter than policy,
+never looser.** Without that, the whole configuration surface becomes a way to
+opt out of the controls in §14.
+
+### 21.6 Budgets per workflow
+
+`budgets` binds all four limiters from §9.2 plus one addition: `taskBudgetTokens`
+gives the implementer an advisory token ceiling for an agentic task so it paces
+itself and finishes cleanly, rather than being cut off mid-edit. It is advisory
+and token-denominated; `perRunUsd` remains the hard, enforced stop. Both exist
+because they fail differently — the advisory budget improves the *shape* of the
+work, the hard budget bounds the *bill*.
+
+---
+
+## 22. Configuration and credentials
+
+### 22.1 Three layers, and which one wins
+
+```
+policy.json      (committed, not locally overridable)   ← ceiling on autonomy
+   ▲
+workflows/*.yaml (committed, team-reviewed)             ← how this kind of ticket runs
+   ▲
+config.json      (committed)                            ← integrations, defaults
+   ▲
+VS Code settings (per user, per machine)                ← concurrency, UI, opt-ins
+   ▲
+SecretStorage    (per user, never written to disk in cleartext)  ← credentials
+```
+
+Resolution is strictest-wins for anything safety-relevant (paths, gates, gates
+count, allowed models) and nearest-wins for anything ergonomic (concurrency,
+notification preferences, follow-mode). A user can always make their own machine
+run *fewer* things in parallel; they can never make a run touch a forbidden path.
+
+### 22.2 Claude API configuration
+
+```jsonc
+// .agentflow/config.json → "claude"
+{
+  "auth": "secretStorage",        // 'secretStorage' | 'cliProfile' | 'env'
+  "profile": "work",              // when auth == 'cliProfile'
+  "baseUrl": null,                // set for a gateway or proxy
+  "provider": "anthropic",        // 'anthropic' | 'bedrock' | 'vertex' | 'foundry'
+  "region": null,                 // required for bedrock/vertex
+  "defaultAgents": {              // fallback when a workflow omits a role
+    "triage": { "model": "haiku", "effort": "low" },
+    "analyst": { "model": "opus", "effort": "high", "thinking": "adaptive" },
+    "implementer": { "model": "sonnet", "effort": "medium" },
+    "reviewer": { "model": "opus", "effort": "xhigh", "thinking": "adaptive" }
+  },
+  "caching": { "enabled": true, "excludeDynamicSections": true },
+  "allowedModels": ["haiku", "sonnet", "opus"],   // 'fable' withheld pending retention review
+  "maxConcurrentModelCalls": 6
+}
+```
+
+The settings UI (§23.3) writes this file for the committed fields and
+`SecretStorage` for the key. **The API key is never written to `config.json`,
+never placed in VS Code settings, and never appears in an event log** — a
+redaction pass runs over every event before it is persisted or displayed (§14).
+
+Auth resolution, in order: an explicitly configured `SecretStorage` entry → a
+named CLI profile → the ambient environment. The settings view shows which one
+resolved and for which workspace, because "which credential is this actually
+using" is the single most common support question for a tool like this.
+
+**Connection test** — a real request against the smallest model, reporting
+latency, the resolved auth source, the account's available models, and whether
+prompt caching is being served. Not a ping: a green check that does not prove a
+real completion is worse than no check.
+
+### 22.3 Jira connection configuration
+
+```jsonc
+// .agentflow/config.json → "integrations.jira"
+{
+  "host": "https://acme.atlassian.net",
+  "auth": "pat",                  // 'pat' | 'oauth'
+  "projects": ["PAY", "CHK"],
+  "readyState": "Ready for Dev",
+  "jql": "project in (PAY) AND status = \"Ready for Dev\" AND assignee = currentUser()",
+  "watch": { "enabled": false, "pollSeconds": 120 },
+  "fieldMap": {                   // Jira instances are all different
+    "acceptanceCriteria": "customfield_10231",
+    "designLinks": "customfield_10442",
+    "storyPoints": "customfield_10016"
+  },
+  "transitions": {                // named, not numeric — ids differ per project
+    "onStart": "In Progress",
+    "onPrOpened": "In Review",
+    "onBlocked": "Blocked"
+  },
+  "writePolicy": "batch_at_ship", // 'batch_at_ship' | 'ask_each' | 'never'
+  "commentTemplate": ".agentflow/templates/jira-pr-comment.md"
+}
+```
+
+Three things this configuration has to get right, because each is a way real
+Jira integrations fail:
+
+- **`fieldMap` is mandatory, not inferred.** Acceptance criteria live in a
+  different custom field in every instance. Guessing produces a spec whose ACs
+  are silently empty, which then produces a plan that satisfies nothing.
+- **Transitions are named and validated against the project's actual workflow**
+  at setup time, with the available transitions listed in the UI. A hardcoded
+  transition ID is the most common way this integration breaks after a Jira
+  admin edits a board.
+- **`writePolicy` defaults to `batch_at_ship`.** Nothing writes to Jira during
+  exploration. An agent that comments on tickets while it is thinking is the
+  fastest way to get the tool banned by the team (§8.2).
+
+**Connection test** — resolves the host, authenticates, fetches one issue from
+each configured project, and reports which mapped fields were found and which
+were empty. Field mapping that is wrong is invisible until the spec is bad, so
+the test surfaces it at configuration time.
+
+### 22.4 Credentials
+
+| Secret | Storage | Never |
+|---|---|---|
+| Claude API key | VS Code `SecretStorage` | settings JSON, event log, worktree, prompt |
+| Jira PAT / OAuth token | `SecretStorage`, keyed by host | committed config, log |
+| Forge token | `SecretStorage` | — |
+
+Secrets are held by the extension host and handed to the orchestrator over the
+RPC channel on demand, never written to `.agentflow/`. Workers receive an
+environment allowlist, not the host's environment. Every persisted event passes
+a redaction pass keyed on credential *shapes*, not just on known values, so a
+token that arrives from an integration response is redacted too.
+
+### 22.5 Health
+
+Every adapter implements `health()` (§8.1). The settings view renders the
+results together, and the orchestrator re-checks before starting a run — a run
+that is going to fail on Jira auth should fail at second zero, not after the
+harvest has already been paid for.
+
+---
+
+## 23. Settings, workflows, review and usage UI
+
+### 23.1 Surfaces added
+
+| Surface | Type | Content |
+|---|---|---|
+| **Workflows** | TreeView + editor | Every workflow, built-in and custom; run, duplicate, edit, validate |
+| **Settings** | Webview, tabbed | Connections · Agents · Workflows · Budgets · Policy |
+| **Usage** | Webview | Spend and tokens by run, ticket, workflow, role, model, day |
+| **Review** | Webview + native diff | The Gate 3 surface (§5 Stage 10), as a first-class window |
+| **Chat** | Chat participant | `@agentflow` — status, steer, and approve as a side channel |
+
+### 23.2 Workflows view
+
+A tree grouped into **Built-in** and **Custom**, each row showing the workflow's
+name, the models it binds, and its estimated cost band. Row actions: *Run a
+ticket with this*, *Duplicate*, *Edit* (opens the YAML with schema-backed
+completion and inline validation), *Validate*, *Delete* (custom only).
+
+Selecting a workflow opens a read-only summary: the phase pipeline with skipped
+stages struck through, the role→model table, the gate list, budgets, and the
+guardrails — the same view a reviewer sees on the PR that adds the workflow.
+
+**Estimated cost band** is computed from the role bindings and the median token
+usage of past runs on that workflow, shown as a range rather than a number.
+A precise-looking estimate that is wrong is worse than an honest band.
+
+### 23.3 Settings view
+
+Five tabs, all writing the files in §22 rather than a hidden store:
+
+- **Connections** — Claude and Jira (and forge) configuration with the live
+  connection tests from §22.2 and §22.3, plus resolved-auth-source display.
+- **Agents** — the default role→model bindings, with the catalogue table, per
+  role effort and thinking, and a live per-role price-per-1M readout. Changing a
+  binding here changes the default; workflows override it.
+- **Workflows** — which workflow each ticket type defaults to, and the mapping
+  from Jira issue type or label to workflow.
+- **Budgets** — per run, per ticket, per day, and the concurrency limits from
+  §4.3 with the machine-appropriate defaults pre-filled.
+- **Policy** — read-only rendering of `policy.json`, showing exactly which
+  settings on the other tabs are clamped by it and why. A greyed-out control
+  with no explanation is how people conclude the tool is broken.
+
+### 23.4 Usage view
+
+Spend is only useful if it is attributable. The view breaks the same total down
+four ways, because each answers a different question:
+
+| Breakdown | Answers |
+|---|---|
+| By run and ticket | "What did this ticket cost?" |
+| By **role and model** | "Is the reviewer binding worth it?" |
+| By workflow | "Is `payments-hotfix` cheaper than `bug`?" |
+| By day, against a budget line | "Are we on track this month?" |
+
+Plus the two ratios that decide whether the configuration is right: **cost per
+completed ticket** and **cache hit rate**. A collapsing cache hit rate is the
+usual explanation for a bill that grew without the workload growing, and it is
+invisible in a per-run total.
+
+Data comes from the `cost` events already in the log (§3.3), so the view is a
+fold over existing data and works retroactively on runs that predate it. Treat
+the client-side figure as an estimate and reconcile against the Console
+periodically (§15).
+
+### 23.5 The review window
+
+Gate 3 gets a real window rather than a diff editor plus scattered diagnostics.
+Four panes over one run:
+
+1. **Diff** — multi-file, native diff editors against the baseline
+   `FileSystemProvider` (§10.2), file list ordered by risk rather than by path.
+2. **Findings** — the reviewer's output (§5 Stage 9), grouped by severity, each
+   pinned as a diagnostic on its line, each with *Accept* / *Dismiss with
+   reason* / *Send to repair*.
+3. **Evidence** — gate reports: what ran, exit codes, durations, coverage delta,
+   screenshot diffs. This pane is why the human can trust the green.
+4. **Conformance** — planned versus changed, with unplanned files highlighted
+   and unimplemented tasks listed.
+
+Actions are the §5 Stage 10 set: **Approve → ship**, **Comment → repair**
+(inline comments become repair tasks with the comment text passed verbatim),
+**Reject**, **Take over**.
+
+### 23.6 Approving from chat
+
+A `@agentflow` chat participant is registered as a **side channel**, consistent
+with §1.3 — this is not a chat IDE. It can report status, answer "what is
+PAY-1423 doing", steer a live run, and present a pending gate with its summary,
+risks and cost, accepting `approve`, `revise <note>` or `reject`.
+
+The invariant that makes this safe to add:
+
+> **Chat is an input device, not a second decision path.** A chat approval calls
+> the same broker, emits the same `approval_decided` event, and is subject to
+> the same gate-pending check as the button. There is no code path where a
+> decision reaches the state machine without going through §7.3.
+
+Two constraints follow, and both are enforced rather than documented:
+
+- The chat participant never renders a question or a gate that the broker has
+  not issued. Free-text model output asking for approval is ignored (§7.2).
+- A chat approval records `decidedBy` with the chat surface as provenance, so
+  the audit bundle distinguishes a considered click on the review window from a
+  one-word reply typed on a phone. Both are valid; they are not the same
+  evidence, and the eval in §16.3 should be able to tell them apart.
+
+---
+
 ## Appendix A — Prompt architecture
 
 Every role's prompt is composed from four layers, in this order:
@@ -1227,14 +1667,39 @@ Three rules that carry most of the weight:
 {
   "repos": [{ "path": ".", "baseBranch": "main", "profile": "android-gradle" }],
   "integrations": {
-    "jira": { "host": "https://acme.atlassian.net", "projects": ["PAY"], "readyState": "Ready for Dev" },
+    "jira": {
+      "host": "https://acme.atlassian.net",
+      "auth": "pat",                       // token lives in SecretStorage, never here
+      "projects": ["PAY"],
+      "readyState": "Ready for Dev",
+      "fieldMap": { "acceptanceCriteria": "customfield_10231" },
+      "transitions": { "onStart": "In Progress", "onPrOpened": "In Review" },
+      "writePolicy": "batch_at_ship"
+    },
     "figma": { "teamId": "…" },
     "forge": { "type": "github", "repo": "acme/payments-android" }
+  },
+  "claude": {
+    "auth": "secretStorage",
+    "provider": "anthropic",
+    "allowedModels": ["haiku", "sonnet", "opus"],   // 'fable' needs a retention review
+    "caching": { "enabled": true, "excludeDynamicSections": true },
+    "defaultAgents": {
+      "triage":      { "model": "haiku",  "effort": "low" },
+      "analyst":     { "model": "opus",   "effort": "high",  "thinking": "adaptive" },
+      "planner":     { "model": "opus",   "effort": "xhigh", "thinking": "adaptive" },
+      "implementer": { "model": "sonnet", "effort": "medium" },
+      "reviewer":    { "model": "opus",   "effort": "xhigh", "thinking": "adaptive" }
+    }
+  },
+  "workflows": {
+    "dir": ".agentflow/workflows",
+    "default": "feature",
+    "byIssueType": { "Bug": "bug", "Task": "chore", "Spike": "spike" }
   },
   "concurrency": { "maxActiveRuns": 4, "maxConcurrentGateJobs": 2, "maxConcurrentModelCalls": 6 },
   "budgets": { "perRunUsd": 8, "perTicketMinutes": 90, "attemptsPerTask": 4 },
   "gates": { "config": ".agentflow/gates.yaml", "coverageThreshold": 0.8 },
-  "models": { "planner": "opus", "implementer": "sonnet", "triage": "haiku" },
   "autonomy": { "gates": ["G1","G2","G3"], "outOfPlanPolicy": "ask" }
 }
 ```
@@ -1246,6 +1711,9 @@ Three rules that carry most of the weight:
   "requiredGates": ["compile","lint","unit","coverage","secretscan"],
   "maxAutonomy": "gated",
   "allowDependencyChanges": false,
-  "telemetry": "off"
+  "telemetry": "off",
+  "forbiddenModels": ["fable"],          // data-retention constraint, §21.4
+  "maxPerRunUsd": 15,
+  "workflowsMayLoosenPolicy": false      // always false; present to be explicit
 }
 ```
