@@ -5,3 +5,4 @@ out/
 .agentflow/
 *.vsix
 .DS_Store
+agentflow.vsix

@@ -10,13 +10,16 @@
     "packages/extension",
     "packages/webview"
   ],
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "typecheck": "tsc -b packages/protocol packages/core packages/orchestrator packages/extension",
     "test": "vitest run",
     "test:watch": "vitest",
-    "clean": "rm -rf packages/*/dist packages/*/tsconfig.tsbuildinfo"
+    "clean": "rm -rf packages/*/dist packages/*/tsconfig.tsbuildinfo",
+    "package": "npm run build --workspace packages/extension && npm run package --workspace packages/extension"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
@@ -24,5 +27,9 @@
     "vitest": "^2.1.0",
     "fast-check": "^3.23.0",
     "esbuild": "^0.24.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BuddhaNag12/agentic-extension.git"
   }
 }
