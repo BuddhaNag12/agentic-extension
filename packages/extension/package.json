@@ -1,0 +1,77 @@
+{
+  "name": "agentflow",
+  "displayName": "AgentFlow",
+  "description": "Multi-agent ticket-to-PR workflow",
+  "version": "0.0.1",
+  "private": true,
+  "publisher": "agentflow",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Other"],
+  "main": "./dist/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "scripts": {
+    "build": "tsc -b && node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "agentflow", "title": "AgentFlow", "icon": "resources/agentflow.svg" }
+      ]
+    },
+    "views": {
+      "agentflow": [
+        { "id": "agentflow.runs", "name": "Runs" },
+        { "id": "agentflow.inbox", "name": "Needs You" }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "agentflow.runs",
+        "contents": "No runs yet.\n[Start a run](command:agentflow.createRun)"
+      }
+    ],
+    "commands": [
+      { "command": "agentflow.createRun", "title": "AgentFlow: Start Run from Ticket", "icon": "$(add)" },
+      { "command": "agentflow.refresh", "title": "AgentFlow: Refresh", "icon": "$(refresh)" },
+      { "command": "agentflow.openRun", "title": "AgentFlow: Open Run Detail" },
+      { "command": "agentflow.cancelRun", "title": "AgentFlow: Cancel Run", "icon": "$(stop-circle)" },
+      { "command": "agentflow.answerNext", "title": "AgentFlow: Answer Next Question" },
+      { "command": "agentflow.showLog", "title": "AgentFlow: Show Orchestrator Log" },
+      { "command": "agentflow.restartOrchestrator", "title": "AgentFlow: Restart Orchestrator" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "agentflow.createRun", "when": "view == agentflow.runs", "group": "navigation@1" },
+        { "command": "agentflow.refresh", "when": "view == agentflow.runs", "group": "navigation@2" }
+      ],
+      "view/item/context": [
+        { "command": "agentflow.cancelRun", "when": "view == agentflow.runs && viewItem == run", "group": "inline" }
+      ]
+    },
+    "configuration": {
+      "title": "AgentFlow",
+      "properties": {
+        "agentflow.concurrency.maxActiveRuns": {
+          "type": "number", "default": 4,
+          "description": "Maximum runs executing at once. Lower this on machines under 16 GB."
+        },
+        "agentflow.concurrency.maxConcurrentGateJobs": {
+          "type": "number", "default": 2,
+          "description": "Maximum builds/test suites at once. Metered separately from model calls."
+        },
+        "agentflow.orchestrator.autoStart": {
+          "type": "boolean", "default": true,
+          "description": "Spawn the orchestrator daemon on activation."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "@agentflow/core": "0.0.1",
+    "@agentflow/protocol": "0.0.1",
+    "@agentflow/orchestrator": "0.0.1",
+    "vscode-jsonrpc": "^8.2.1"
+  },
+  "devDependencies": { "@types/vscode": "^1.90.0" }
+}

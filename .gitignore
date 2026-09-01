@@ -1,0 +1,7 @@
+node_modules/
+dist/
+out/
+*.tsbuildinfo
+.agentflow/
+*.vsix
+.DS_Store

@@ -1,0 +1,7 @@
+{
+  "name": "@agentflow/webview",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Dashboard and inbox webviews (M3)",
+  "scripts": { "build": "echo 'webview lands in M3' " }
+}
