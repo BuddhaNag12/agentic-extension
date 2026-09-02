@@ -6,6 +6,7 @@
   "workspaces": [
     "packages/protocol",
     "packages/core",
+    "packages/agent-runtime",
     "packages/gates",
     "packages/orchestrator",
     "packages/extension",
@@ -16,7 +17,7 @@
   },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "typecheck": "tsc -b packages/protocol packages/core packages/gates packages/orchestrator packages/extension",
+    "typecheck": "tsc -b packages/protocol packages/core packages/agent-runtime packages/gates packages/orchestrator packages/extension",
     "test": "vitest run",
     "test:watch": "vitest",
     "clean": "rm -rf packages/*/dist packages/*/tsconfig.tsbuildinfo",

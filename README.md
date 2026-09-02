@@ -33,8 +33,13 @@ exercised end to end before a single model call exists.
 - **Gates** (§12.2) — the adapter interface, a Node/TypeScript adapter set with
   real parsers, and a runner that fails fast and refuses to call a gate green
   when the tool never ran
+- **Guardrails** (§7.4, §9.3) — the `PreToolUse` policy: worktree escape,
+  path allow/denylists, credential-shape detection, bash policy, and the seven
+  §9.3 anti-patterns that let a repair loop fake success
+- **Replay model** (§12.7) — recorded transcripts replayed through the *live*
+  guardrail hook, so orchestration is testable with no API key
 
-- 133 tests: state machine, replay (including a property test), failure
+- 196 tests: state machine, replay (including a property test), failure
   signatures, concurrency, workflow validation, real git worktrees, real gate
   execution, and a daemon integration test over the real socket
 
@@ -47,6 +52,7 @@ the rest of M1.
 |---|---|---|
 | `protocol` | zod schemas, RPC contract — single source of truth | anything |
 | `core` | domain model, state machine, event log, replay | `vscode`, the Agent SDK |
+| `agent-runtime` | guardrails, provider seam, replay model, prompt composition | `vscode` |
 | `gates` | gate adapters, parsers, the fail-fast runner | `vscode`, the Agent SDK |
 | `orchestrator` | daemon: scheduling, worktrees, brokers, persistence | `vscode` |
 | `extension` | VS Code host: activation, commands, views | — |
@@ -81,17 +87,21 @@ set `AGENTFLOW_FAKE_TIME_SCALE=0.1` in the environment before launching.
 - Workflow schema and W1–W8 validator (§21) — [validate.ts](packages/core/src/workflow/validate.ts), [loader.ts](packages/core/src/workflow/loader.ts)
 - Worktrees (§4.1, §13.2) — [worktree.ts](packages/orchestrator/src/git/worktree.ts)
 - Gate ladder and parsers (§12) — [runner.ts](packages/gates/src/runner.ts), [node.ts](packages/gates/src/adapters/node.ts)
+- Tool permissions and anti-patterns (§7.4, §9.3) — [guardrails/](packages/agent-runtime/src/guardrails/)
+- Replay model and provider seam (§12.7, §17.3) — [replay.ts](packages/agent-runtime/src/providers/replay.ts)
+- Prompt layers (Appendix A) — [compose.ts](packages/agent-runtime/src/prompts/compose.ts)
 
 Decisions taken while building this, including the six open questions from
 §20, are recorded in [DECISIONS.md](DECISIONS.md).
 
 ## Next: the rest of M1
 
-What is left needs credentials: a Jira adapter reading a real ticket, the
-agent-runtime wrapper around the Claude Agent SDK, and the harvest/spec/plan
-phases calling real models. The deterministic pieces those plug into — the
-workflow that configures them, the worktree they write in, and the gates that
-judge them — are done and tested.
+What is left needs credentials: a Jira adapter reading a real ticket, a
+`ClaudeProvider` implementing the provider seam against
+`@anthropic-ai/claude-agent-sdk`, and the harvest/spec/plan phases calling real
+models. Everything those plug into — the workflow that configures them, the
+worktree they write in, the guardrails that constrain them, and the gates that
+judge them — is done and tested.
 
 The exit criterion is the one that matters: **one real, simple ticket becomes a
 real PR.** Do not proceed to M2 until that is genuinely useful on a real
