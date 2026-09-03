@@ -1,5 +1,5 @@
 {
-  "name": "agentflow",
+  "name": "agentflow-monorepo",
   "version": "0.0.1",
   "private": true,
   "description": "Multi-agent ticket-to-PR workflow extension for VS Code",
