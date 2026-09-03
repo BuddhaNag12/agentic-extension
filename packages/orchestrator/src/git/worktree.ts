@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { git, gitLine } from './exec.js';
 
@@ -24,7 +24,17 @@ export interface CreateWorktreeInput {
   baseRef: string;
   /** Defaults to `agentflow/<ticketKey>`. */
   branch?: string;
+  /**
+   * Repo-root entries to symlink into the new tree instead of recreating
+   * (§12.6). A fresh worktree has no `node_modules`, so every gate in it fails
+   * with a module-resolution error that looks like a code problem and is not.
+   * Sharing is safe for install output; never share source or config.
+   */
+  share?: readonly string[];
 }
+
+/** What a JS/TS repo needs to run a gate at all. */
+export const DEFAULT_SHARED_PATHS = ['node_modules'] as const;
 
 export class WorktreeManager {
   constructor(
@@ -78,7 +88,27 @@ export class WorktreeManager {
       : ['worktree', 'add', path, '-b', branch, baseSha];
     await git(this.repoRoot, args);
 
+    for (const entry of input.share ?? DEFAULT_SHARED_PATHS) {
+      this.share(path, entry);
+    }
+
     return { path, branch, baseRef: input.baseRef, baseSha, headSha: await this.head(path) };
+  }
+
+  /**
+   * Symlink one repo-root entry into a worktree. Silently skipped when the
+   * source is missing or the target already exists — a repo with no
+   * `node_modules` is a valid repo, not an error.
+   */
+  private share(worktreePath: string, entry: string): void {
+    const source = join(this.repoRoot, entry);
+    const target = join(worktreePath, entry);
+    if (!existsSync(source) || existsSync(target)) return;
+    try {
+      symlinkSync(source, target, 'dir');
+    } catch {
+      // A failed link costs a slower gate, never a failed run.
+    }
   }
 
   async branchExists(branch: string): Promise<boolean> {
@@ -135,8 +165,16 @@ export class WorktreeManager {
     await git(this.repoRoot, ['worktree', 'prune'], true);
   }
 
-  /** Files changed against the run's base, as `{path, op}` pairs. */
-  async changedFiles(worktreePath: string, baseSha: string): Promise<{ path: string; op: 'create' | 'modify' | 'delete' }[]> {
+  /**
+   * Files changed against the run's base. Shared entries (§12.6) are excluded:
+   * a symlinked `node_modules` is infrastructure, not something the run did,
+   * and letting it reach the review surface is noise at best.
+   */
+  async changedFiles(
+    worktreePath: string,
+    baseSha: string,
+    shared: readonly string[] = DEFAULT_SHARED_PATHS,
+  ): Promise<{ path: string; op: 'create' | 'modify' | 'delete' }[]> {
     const { stdout } = await git(worktreePath, ['diff', '--name-status', baseSha, '--']);
     const tracked = stdout.split('\n').filter(Boolean).map((line) => {
       const [status, ...rest] = line.split('\t');
@@ -153,7 +191,8 @@ export class WorktreeManager {
     const news = untracked.split('\n').filter(Boolean).map((path) => ({ path, op: 'create' as const }));
 
     const seen = new Set(tracked.map((f) => f.path));
-    return [...tracked, ...news.filter((f) => !seen.has(f.path))];
+    const all = [...tracked, ...news.filter((f) => !seen.has(f.path))];
+    return all.filter((f) => !shared.some((s) => f.path === s || f.path.startsWith(`${s}/`)));
   }
 
   async isDirty(worktreePath: string): Promise<boolean> {

@@ -46,6 +46,10 @@ exercised end to end before a single model call exists.
 - **Spec** (§5 Stage 2) — the specification, gated by SPEC_VALID: every
   acceptance criterion carries a verbatim quote that is checked against the
   ticket or the digest, so an invented requirement fails the gate
+- **Decompose** (§5 Stage 5) — mechanical, no model: the plan compiles into
+  self-contained work packets with per-task path allowlists and touch budgets
+- **Implement** (§5 Stage 6) — the first phase that writes, in a real worktree,
+  with the guardrails binding through `PreToolUse`
 - **Plan** (§5 Stage 4) — the task DAG, gated by PLAN_VALID's seven rules:
   acyclic, coverage in both directions, every task machine-checkable, predicted
   paths that exist, repro-test-first for bugs, and a split proposed rather than
@@ -115,8 +119,8 @@ Decisions taken while building this, including the six open questions from
 
 `harvest`, `spec` and `plan` now run for real, end to end — verified against
 this repository for $1.54 a run, producing a three-task DAG with zero gate
-violations. `implement` is next; it adds writes, which the guardrails already
-cover. A Jira
+violations. `implement` writes into a real git worktree and its declared gate was run
+against the result — it passed. A Jira
 adapter can wait — a pasted ticket description is enough to exercise everything.
 
 Credentials: the Agent SDK drives the Claude Code CLI, which resolves its own

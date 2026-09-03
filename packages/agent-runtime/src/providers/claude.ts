@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import type { CanUseTool, Options, Query, SDKMessage } from '@anthropic-ai/claude-agent-sdk' with { 'resolution-mode': 'import' };
+import type {
+  CanUseTool, HookJSONOutput, Options, PreToolUseHookInput, Query, SDKMessage,
+} from '@anthropic-ai/claude-agent-sdk' with { 'resolution-mode': 'import' };
 import { MODEL_CATALOGUE } from '@agentflow/protocol';
 import { checkToolCall } from '../guardrails/index.js';
 import type {
@@ -89,6 +91,11 @@ class ClaudeSession implements AgentSession {
       permissionMode: this.opts.guardrails.allowedPaths.length === 0 && this.isReadOnlyRole()
         ? 'plan'
         : 'acceptEdits',
+      // Both layers, deliberately. `acceptEdits` pre-approves edits inside the
+      // workspace, so canUseTool is never consulted for them — relying on it
+      // alone silently bypasses every guardrail on exactly the calls that write.
+      // PreToolUse runs before every tool call regardless of mode (§7.4 Layer 1).
+      hooks: { PreToolUse: [{ hooks: [this.preToolUse()] }] },
       canUseTool: this.canUseTool(),
       enableFileCheckpointing: true,
       includePartialMessages: false,
@@ -116,10 +123,38 @@ class ClaudeSession implements AgentSession {
     return ['triage', 'harvest', 'analyst', 'planner', 'reviewer', 'summarizer'].includes(this.opts.role);
   }
 
+  /**
+   * §7.4 Layer 1. Runs before every tool call, in every permission mode, which
+   * is what makes the policy actually binding.
+   */
+  private preToolUse(): (input: unknown) => Promise<HookJSONOutput> {
+    const hook = this.opts.permissionHook ?? this.permissionHook;
+    return async (raw: unknown): Promise<HookJSONOutput> => {
+      const input = raw as PreToolUseHookInput;
+      if (input.hook_event_name !== 'PreToolUse') return {};
+
+      const decision = hook(
+        { tool: input.tool_name, input: (input.tool_input as Record<string, unknown>) ?? {} },
+        this.opts.guardrails,
+      );
+      if (decision.decision === 'allow') {
+        return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } };
+      }
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: `[${decision.rule}] ${decision.reason}`,
+        },
+      };
+    };
+  }
+
   /** Every tool call passes the same guardrails the replay provider enforces. */
   private canUseTool(): CanUseTool {
+    const hook = this.opts.permissionHook ?? this.permissionHook;
     return async (toolName, input) => {
-      const decision = this.permissionHook({ tool: toolName, input }, this.opts.guardrails);
+      const decision = hook({ tool: toolName, input }, this.opts.guardrails);
       if (decision.decision === 'allow') return { behavior: 'allow', updatedInput: input };
       // Both `deny` and `ask` stop the call. `ask` reaching here means no human
       // is attached to answer it, and proceeding would be deciding on their

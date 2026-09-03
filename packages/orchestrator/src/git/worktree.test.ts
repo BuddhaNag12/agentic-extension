@@ -116,6 +116,29 @@ describe('creating worktrees', () => {
   });
 });
 
+describe('shared paths (§12.6)', () => {
+  it('links node_modules so a gate can actually run in the tree', async () => {
+    mkdirSync(join(repo, 'node_modules', 'left-pad'), { recursive: true });
+    writeFileSync(join(repo, 'node_modules', 'left-pad', 'index.js'), 'module.exports = 1;\n');
+
+    const info = await manager.create({ ticketKey: 'PAY-1', baseRef: 'main' });
+    expect(existsSync(join(info.path, 'node_modules', 'left-pad', 'index.js'))).toBe(true);
+  });
+
+  it('is fine with a repo that has no node_modules', async () => {
+    const info = await manager.create({ ticketKey: 'PAY-1', baseRef: 'main' });
+    expect(existsSync(join(info.path, 'node_modules'))).toBe(false);
+  });
+
+  it('shares only what it was asked to', async () => {
+    mkdirSync(join(repo, 'node_modules'), { recursive: true });
+    mkdirSync(join(repo, '.cache'), { recursive: true });
+    const info = await manager.create({ ticketKey: 'PAY-1', baseRef: 'main', share: ['.cache'] });
+    expect(existsSync(join(info.path, '.cache'))).toBe(true);
+    expect(existsSync(join(info.path, 'node_modules'))).toBe(false);
+  });
+});
+
 describe('tracking changes', () => {
   it('reports created, modified and deleted files against the base', async () => {
     const info = await manager.create({ ticketKey: 'PAY-1', baseRef: 'main' });

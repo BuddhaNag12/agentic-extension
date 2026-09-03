@@ -291,6 +291,19 @@ describe('the hook as a whole', () => {
     expect(checkToolCall({ tool: 'DeployToProd', input: {} }, ctx())).toMatchObject({ decision: 'ask' });
   });
 
+  it('allows the runtime tool a phase returns its result through', () => {
+    // Denying StructuredOutput costs the model a retry per attempt and the
+    // phase its result — it carries no file or shell side effect.
+    expect(checkToolCall({ tool: 'StructuredOutput', input: { result: {} } }, ctx())).toEqual({ decision: 'allow' });
+  });
+
+  it('does not count a read against the touch budget', () => {
+    const c = ctx({ maxFilesTouched: 1, filesTouched: new Set(['a.ts']) });
+    // The budget is spent, but reading is still how a task does its job.
+    expect(checkToolCall({ tool: 'Read', input: { file_path: 'b.ts' } }, c)).toEqual({ decision: 'allow' });
+    expect(checkToolCall(write('b.ts'), c)).toMatchObject({ decision: 'deny', rule: 'antipattern.scope_explosion' });
+  });
+
   it('checks the secret before the scope, so the worse reason is reported', () => {
     const c = ctx({ allowedPaths: ['src/checkout/**'] });
     const d = checkToolCall(write('src/billing/x.ts', 'const k = "AKIAIOSFODNN7EXAMPLE";'), c);

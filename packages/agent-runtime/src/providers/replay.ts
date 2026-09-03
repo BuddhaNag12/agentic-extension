@@ -87,7 +87,7 @@ class ReplaySession implements AgentSession {
       return;
     }
 
-    const hook = this.options.permissionHook ?? checkToolCall;
+    const hook = this.opts.permissionHook ?? this.options.permissionHook ?? checkToolCall;
 
     for (const turn of exchange.turns) {
       if (this.interrupted) return;
@@ -118,7 +118,7 @@ class ReplaySession implements AgentSession {
   private wasBlocked(turns: readonly AgentTurn[], result: AgentTurn): boolean {
     const call = turns.find((t) => t.type === 'tool_call' && t.toolUseId === result.toolUseId);
     if (!call) return false;
-    const hook = this.options.permissionHook ?? checkToolCall;
+    const hook = this.opts.permissionHook ?? this.options.permissionHook ?? checkToolCall;
     return hook({ tool: call.tool ?? '', input: call.input ?? {} }, this.opts.guardrails).decision !== 'allow';
   }
 

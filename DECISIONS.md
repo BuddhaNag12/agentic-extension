@@ -290,3 +290,34 @@ That is the §15.1 model-routing lever working as intended rather than a problem
 to fix. A bad plan is paid for repeatedly in the repair loop; a good one is paid
 for once. Revisit only if the ratio moves after the implement phase exists and
 the true per-run total is known.
+
+### D28 — Guardrails go in `PreToolUse`, not only `canUseTool`
+
+The first live implement run reported three files written and a `filesTouched`
+of `[]`. The cause: `permissionMode: 'acceptEdits'` pre-approves edits inside
+the workspace, so the SDK never consults `canUseTool` for them. **Every guardrail
+was being bypassed on exactly the calls that write.**
+
+§7.4 already says this — Layer 1 is a `PreToolUse` hook that "runs before every
+tool call"; Layer 2 is `canUseTool`, "for calls that fall through policy to a
+prompt". Implementing only Layer 2 silently produced a system with no Layer 1.
+Both are wired now, and the hook is the binding one.
+
+Worth remembering as a class of bug: a permission layer that is never invoked
+looks exactly like a permission layer that always allows.
+
+### D29 — Only a write counts against the touch budget
+
+The same run counted every `Read` against `maxFilesTouched`, so a task that
+explored three files before editing had already spent its budget. Reads are how
+a task does its job; the budget exists to stop scope creep, which is a property
+of writes.
+
+### D30 — A worktree shares `node_modules`, and sharing is not a change
+
+A fresh worktree has no `node_modules`, so every gate in it fails with a
+module-resolution error that reads like a code problem and is not — the first
+run's implementer correctly reported it could not verify its own work, and was
+right. `WorktreeManager` now symlinks shared entries (§12.6) on create, and
+excludes them from `changedFiles` so infrastructure never reaches the review
+surface as a diff.

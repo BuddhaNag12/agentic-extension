@@ -13,8 +13,19 @@ export * from './types.js';
 /** Beyond this, an "edit" is a generated blob or a mistake. */
 export const MAX_WRITE_BYTES = 512 * 1024;
 
-const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'str_replace_based_edit_tool']);
 const READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebSearch', 'TodoWrite', 'Task']);
+
+/**
+ * Runtime-internal tools that carry no file or shell side effect. The SDK
+ * returns a phase's structured result through `StructuredOutput`; denying it
+ * costs the model a retry per attempt and the phase its result.
+ */
+const RUNTIME_TOOLS = new Set(['StructuredOutput', 'ExitPlanMode', 'AskUserQuestion']);
+
+/** Tools that write. Only these count against the touch budget. */
+export const WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'str_replace_based_edit_tool',
+]);
 
 /**
  * The `PreToolUse` hook (§7.4 Layer 1). Deterministic policy applied before
@@ -24,14 +35,14 @@ const READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebSearch', 'TodoWrite', 'T
  * that is both out of scope and writing a secret is refused for the secret.
  */
 export function checkToolCall(call: ToolCall, ctx: GuardrailContext): GuardrailDecision {
-  if (READ_TOOLS.has(call.tool)) return ALLOW;
+  if (READ_TOOLS.has(call.tool) || RUNTIME_TOOLS.has(call.tool)) return ALLOW;
 
   if (call.tool === 'Bash') {
     const command = String(call.input['command'] ?? '');
     return checkBash(command, ctx.allowedBashPrefixes ?? DEFAULT_SAFE_PREFIXES);
   }
 
-  if (!WRITE_TOOLS.has(call.tool)) {
+  if (!WRITE_TOOL_NAMES.has(call.tool)) {
     return { decision: 'ask', rule: 'tool.unrecognized', reason: `"${call.tool}" is not on the auto-approved tool list.` };
   }
 

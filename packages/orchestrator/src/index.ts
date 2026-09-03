@@ -5,3 +5,5 @@ export * from './paths.js';
 export * from './scheduler.js';
 export * from './runs/store.js';
 export * from './runs/fakeDriver.js';
+export * from './git/worktree.js';
+export * from './git/exec.js';

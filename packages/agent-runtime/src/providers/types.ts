@@ -24,6 +24,12 @@ export interface SessionOptions {
   /** JSON Schema the result must satisfy — the orchestrator parses, not reads. */
   outputSchema?: unknown;
   guardrails: GuardrailContext;
+  /**
+   * Overrides the provider's default hook for this session. The implement
+   * phase uses it to record each allowed write, so the touch budget is
+   * evaluated against what has actually happened rather than a snapshot.
+   */
+  permissionHook?: PermissionHook;
 }
 
 export interface AgentTurn {
