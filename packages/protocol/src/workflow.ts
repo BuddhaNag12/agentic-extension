@@ -35,7 +35,7 @@ export const WorkflowPipeline = z.object({
   gates: z.object({
     required: z.array(GateId).default([]),
     coverageThreshold: z.number().min(0).max(1).default(0.8),
-  }).default({}),
+  }).prefault({}),
 });
 
 export const WorkflowBudgets = z.object({
@@ -70,15 +70,15 @@ export const WorkflowDefinition = z.object({
   /** Inherit from another workflow, then override. Cycles are rejected (W2). */
   extends: WorkflowName.optional(),
   builtIn: z.boolean().default(false),
-  pipeline: WorkflowPipeline.default({}),
+  pipeline: WorkflowPipeline.prefault({}),
   /**
    * Passthrough is off: an unknown role must be a loud error. `verifier` in
    * particular has to be rejected by name rather than silently ignored (W4).
    */
-  agents: z.record(AgentRole, AgentBinding).default({}),
-  budgets: WorkflowBudgets.default({}),
-  guardrails: WorkflowGuardrails.default({}),
-  hitl: WorkflowHitl.default({}),
+  agents: z.partialRecord(AgentRole, AgentBinding).default({}),
+  budgets: WorkflowBudgets.prefault({}),
+  guardrails: WorkflowGuardrails.prefault({}),
+  hitl: WorkflowHitl.prefault({}),
 });
 export type WorkflowDefinition = z.infer<typeof WorkflowDefinition>;
 

@@ -168,9 +168,9 @@ function asResolved(def: WorkflowDefinition, from: string[]): ResolvedWorkflow {
   return { ...def, resolvedFrom: from } as ResolvedWorkflow;
 }
 
-function formatZodError(error: { issues: { path: (string | number)[]; message: string }[] }): string {
+function formatZodError(error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] }): string {
   return error.issues
     .slice(0, 3)
-    .map((i) => `${i.path.join('.') || '<root>'}: ${i.message}`)
+    .map((i) => `${i.path.map(String).join('.') || '<root>'}: ${i.message}`)
     .join('; ');
 }

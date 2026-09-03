@@ -220,8 +220,8 @@ export const Run = z.object({
   cost: CostLedger,
   createdAt: z.number(),
   updatedAt: z.number(),
-  artifacts: z.record(ArtifactKind, ArtifactRef).default({}),
-  sessions: z.record(Phase, z.string()).default({}),
+  artifacts: z.partialRecord(ArtifactKind, ArtifactRef).default({}),
+  sessions: z.partialRecord(Phase, z.string()).default({}),
   tasks: z.array(Task).default([]),
 });
 export type Run = z.infer<typeof Run>;
