@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
-  EventLog, initialState, loadWorkflows, pipelineOptionsFor, replay, transition,
+  EventLog, initialState, isTerminal, loadWorkflows, pipelineOptionsFor, replay, transition,
   type Effect, type LoadResult, type MachineState, type PipelineOptions,
   type ReplayState, type Trigger,
 } from '@agentflow/core';
@@ -74,6 +74,12 @@ export class RunStore extends EventEmitter {
 
   get(runId: string): RunHandle | undefined {
     return this.runs.get(runId);
+  }
+
+  /** A terminal run accepts no further decisions (§5, machine invariant). */
+  isFinished(runId: string): boolean {
+    const handle = this.runs.get(runId);
+    return handle ? isTerminal(handle.machine) : true;
   }
 
   events(runId: string, sinceSeq = 0): RunEvent[] {

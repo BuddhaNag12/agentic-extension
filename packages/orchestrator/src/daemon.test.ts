@@ -157,6 +157,60 @@ describe('a fake run walks the pipeline (M0 exit)', () => {
   });
 });
 
+describe('a finished run stops accepting decisions', () => {
+  const finish = async () => {
+    await handshake();
+    const { run } = await client.sendRequest<{ run: Run }>(Methods.createRun, { ticketKey: 'PAY-5' });
+    await client.sendRequest(Methods.startRun, { runId: run.id });
+    for (const gate of ['G1', 'G2', 'G3'] as const) {
+      await waitFor(() => pending.approvals.some((a) => a.gate === gate), `gate ${gate}`);
+      const approval = pending.approvals.find((a) => a.gate === gate)!;
+      await client.sendRequest(Methods.decideApproval, { runId: run.id, approvalId: approval.id, gate, decision: 'approve' });
+    }
+    await waitFor(async () => (await statusOf(run.id)) === 'succeeded', 'completion');
+    return run;
+  };
+
+  it('withdraws its pending approvals from the inbox', async () => {
+    const run = await finish();
+    await waitFor(() => pending.approvals.every((a) => a.runId !== run.id), 'inbox to clear');
+    expect(pending.approvals.filter((a) => a.runId === run.id)).toEqual([]);
+  });
+
+  it('refuses a late approval instead of logging an error', async () => {
+    const run = await finish();
+    const before = events.length;
+
+    const result = await client.sendRequest<{ ok: boolean; reason?: string }>(Methods.decideApproval, {
+      runId: run.id, approvalId: 'stale-id', gate: 'G3', decision: 'approve',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain('already finished');
+
+    // Nothing is written: no phantom approval_decided, no state_machine error.
+    const after = events.slice(before).map((e) => e.event.t);
+    expect(after).not.toContain('approval_decided');
+    expect(after).not.toContain('error');
+  });
+
+  it('refuses a late answer to a question', async () => {
+    const run = await finish();
+    const result = await client.sendRequest<{ ok: boolean; reason?: string }>(Methods.answerQuestion, {
+      runId: run.id, questionId: 'stale', choice: 'x',
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it('records that the pending items were withdrawn', async () => {
+    const run = await finish();
+    await waitFor(
+      () => events.some((e) => e.runId === run.id && e.event.t === 'log'
+        && (e.event as { message: string }).message.includes('withdrew')),
+      'withdrawal log',
+    );
+  });
+});
+
 describe('persistence (§13)', () => {
   it('rebuilds runs by replaying the log after a daemon restart', async () => {
     await handshake();

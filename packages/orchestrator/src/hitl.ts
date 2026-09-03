@@ -64,6 +64,7 @@ export class HitlBroker extends EventEmitter {
 
   decide(approvalId: string): ApprovalRequest | undefined {
     const req = this.approvals.get(approvalId);
+    if (!req) return undefined;
     this.approvals.delete(approvalId);
     this.emit('pendingChanged');
     return req;
@@ -71,6 +72,28 @@ export class HitlBroker extends EventEmitter {
 
   pendingApprovalFor(runId: string, gate: HumanGate): ApprovalRequest | undefined {
     return [...this.approvals.values()].find((a) => a.runId === runId && a.gate === gate);
+  }
+
+  /**
+   * Drop everything pending for a run. Called when a run reaches a terminal
+   * state: an approval left in the inbox after the run finished is an offer to
+   * decide something that no longer exists, and clicking it produces an error
+   * rather than an outcome.
+   */
+  clearRun(runId: string): { questions: number; approvals: number } {
+    let questions = 0;
+    for (const [id, pending] of [...this.questions]) {
+      if (pending.runId === runId) { this.questions.delete(id); questions += 1; }
+    }
+    let approvals = 0;
+    for (const [id, approval] of [...this.approvals]) {
+      if (approval.runId === runId) { this.approvals.delete(id); approvals += 1; }
+    }
+    for (const key of [...this.perPhaseCount.keys()]) {
+      if (key.startsWith(`${runId}:`)) this.perPhaseCount.delete(key);
+    }
+    if (questions + approvals > 0) this.emit('pendingChanged');
+    return { questions, approvals };
   }
 
   /** A new phase gets a fresh question budget. */

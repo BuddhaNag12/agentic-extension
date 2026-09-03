@@ -156,8 +156,11 @@ export class Orchestrator {
     });
 
     c.onRequest(Methods.answerQuestion, (p: AnswerQuestionParams) => {
+      if (this.store.isFinished(p.runId)) {
+        return { ok: false, reason: 'this run has already finished' };
+      }
       const pending = this.hitl.answer(p.questionId);
-      if (!pending) return { ok: false };
+      if (!pending) return { ok: false, reason: 'that question is no longer open' };
       const handle = this.store.get(p.runId);
       if (handle) {
         this.store.emitEvent(handle, {
@@ -177,7 +180,15 @@ export class Orchestrator {
     });
 
     c.onRequest(Methods.decideApproval, (p: DecideApprovalParams) => {
-      this.hitl.decide(p.approvalId);
+      // Checked before anything is written: recording an approval_decided event
+      // for a run that cannot act on it puts a decision in the audit trail that
+      // never took effect, and then logs an error for the failed transition.
+      if (this.store.isFinished(p.runId)) {
+        return { ok: false, reason: 'this run has already finished; no decision is pending' };
+      }
+      if (!this.hitl.decide(p.approvalId)) {
+        return { ok: false, reason: 'that approval has already been decided' };
+      }
       const handle = this.store.get(p.runId);
       if (handle) {
         this.store.emitEvent(handle, {
@@ -261,8 +272,18 @@ export class Orchestrator {
         case 'run_phase':
           this.hitl.resetPhase(runId, effect.phase);
           break;
+        case 'finalize': {
+          this.driver.cancel(runId);
+          const dropped = this.hitl.clearRun(runId);
+          if (dropped.questions + dropped.approvals > 0) {
+            this.store.emitEvent(handle, {
+              t: 'log', level: 'info',
+              message: `run finished; withdrew ${dropped.approvals} approval(s) and ${dropped.questions} question(s)`,
+            });
+          }
+          break;
+        }
         case 'replan':
-        case 'finalize':
           break;
       }
     }
