@@ -41,8 +41,11 @@ exercised end to end before a single model call exists.
 - **ClaudeProvider** (§17.3) — the provider seam against
   `@anthropic-ai/claude-agent-sdk`, with the guardrails wired into `canUseTool`
   and structured output through `outputFormat`
-- **Harvest** (§5 Stage 1) — the first phase that does real work: read-only
-  repository exploration returning a schema-validated digest
+- **Harvest** (§5 Stage 1) — read-only repository exploration returning a
+  schema-validated digest
+- **Spec** (§5 Stage 2) — the specification, gated by SPEC_VALID: every
+  acceptance criterion carries a verbatim quote that is checked against the
+  ticket or the digest, so an invented requirement fails the gate
 
 - 196 tests: state machine, replay (including a property test), failure
   signatures, concurrency, workflow validation, real git worktrees, real gate
@@ -106,8 +109,9 @@ Decisions taken while building this, including the six open questions from
 
 ## Next: the rest of M1
 
-`harvest` now runs for real. `spec` and `plan` follow the same shape and consume
-its digest; `implement` adds writes, which the guardrails already cover. A Jira
+`harvest` and `spec` now run for real, end to end — verified against this
+repository for $0.94. `plan` follows the same shape and consumes the spec;
+`implement` adds writes, which the guardrails already cover. A Jira
 adapter can wait — a pasted ticket description is enough to exercise everything.
 
 Credentials: the Agent SDK drives the Claude Code CLI, which resolves its own

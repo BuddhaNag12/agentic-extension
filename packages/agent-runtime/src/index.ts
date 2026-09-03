@@ -5,3 +5,4 @@ export * from './providers/claude.js';
 export * from './prompts/compose.js';
 export * from './tools/askHuman.js';
 export * from './phases/harvest.js';
+export * from './phases/spec.js';

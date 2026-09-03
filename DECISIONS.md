@@ -249,3 +249,18 @@ That is useful by accident and wrong by design: a run's behaviour would differ
 per machine, which breaks the reproducibility the replay model and the eval
 harness (§16.3) both depend on. Left as a known issue for now; the fix belongs
 with the phase executors, not the provider.
+
+### D25 — Provenance is a quote, and the quote is checked
+
+§5 Stage 2 requires a `source` on every acceptance criterion. A source that is
+only a label (`"jira:comment:88231"`) is unfalsifiable — the model can write one
+for a requirement it invented.
+
+So `Provenance` carries a verbatim `quote`, and SPEC_VALID rules S1/S2 check that
+the quote actually appears in the ticket or the harvest digest, compared with
+whitespace and case normalized. The model can still write any statement it likes;
+it cannot manufacture the evidence for it. Design references are exempt because
+the frame text is not available to compare against yet.
+
+This is the cheapest anti-hallucination measure in the system, and the first live
+run produced eleven criteria that all passed it.
