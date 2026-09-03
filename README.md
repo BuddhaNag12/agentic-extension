@@ -68,6 +68,11 @@ CLI or web frontend possible (§17.1).
 npm install && npm run build && npm test
 ```
 
+The extension publishes as **`buddhanag12.agentflow`**. The publisher matters:
+`AgentFlow` is an unrelated extension already on the Marketplace, and Marketplace
+identity is `publisher.name` — so a sideloaded build published under `agentflow`
+can be silently replaced by that extension on an update sweep.
+
 Then press <kbd>F5</kbd> in VS Code to launch the extension host, and run
 **AgentFlow: Start Run from Ticket** from the command palette. Enter any key
 shaped like `PAY-1423`, pick a profile, and watch the run walk the pipeline.

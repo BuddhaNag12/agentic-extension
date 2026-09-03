@@ -1,10 +1,21 @@
 {
   "name": "agentflow",
-  "displayName": "AgentFlow",
-  "description": "Multi-agent ticket-to-PR workflow",
+  "displayName": "AgentFlow \u2014 Ticket to PR",
+  "description": "Turn a ticket into a reviewed, tested, gated pull request",
   "version": "0.0.1",
   "private": true,
-  "publisher": "agentflow",
+  "publisher": "buddhanag12",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BuddhaNag12/agentic-extension.git"
+  },
+  "keywords": [
+    "agent",
+    "jira",
+    "pull request",
+    "code review",
+    "claude"
+  ],
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -130,9 +141,5 @@
     "@types/vscode": "^1.90.0",
     "@vscode/vsce": "^3.2.0",
     "vscode-jsonrpc": "^8.2.1"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/BuddhaNag12/agentic-extension.git"
   }
 }

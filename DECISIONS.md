@@ -204,3 +204,22 @@ integration response. Matching on shape alone flags `password = "changeme"` and
 `apiKey = process.env.API_KEY`, and a check that cries wolf gets ignored — so
 the assigned-secret pattern additionally requires a value that is long, mixed in
 character class, and not a recognized placeholder.
+
+### D22 — Published identity is `buddhanag12.agentflow`
+
+`AgentFlow — AI Workflow Visualizer` (publisher `AgentFlow`) already exists on
+the VS Code Marketplace, so `agentflow.agentflow` is not ours to publish. Worse,
+a sideloaded VSIX carrying that id is a live hazard: VS Code checks installed
+extensions for updates **by id**, so a local build under a published id can be
+silently replaced by the stranger's extension.
+
+Marketplace uniqueness is `publisher.name`, so changing only the publisher
+resolves it — the project keeps the name AgentFlow throughout the code, the
+architecture doc, and this file. `displayName` is "AgentFlow — Ticket to PR" so
+the two are distinguishable in search results.
+
+Publishing requires registering the `buddhanag12` publisher at
+<https://marketplace.visualstudio.com/manage>; the id is unclaimed as of now.
+
+The id is what user settings and keybindings bind to, so it does not change
+again without breaking people.
