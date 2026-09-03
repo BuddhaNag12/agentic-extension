@@ -38,6 +38,11 @@ exercised end to end before a single model call exists.
   §9.3 anti-patterns that let a repair loop fake success
 - **Replay model** (§12.7) — recorded transcripts replayed through the *live*
   guardrail hook, so orchestration is testable with no API key
+- **ClaudeProvider** (§17.3) — the provider seam against
+  `@anthropic-ai/claude-agent-sdk`, with the guardrails wired into `canUseTool`
+  and structured output through `outputFormat`
+- **Harvest** (§5 Stage 1) — the first phase that does real work: read-only
+  repository exploration returning a schema-validated digest
 
 - 196 tests: state machine, replay (including a property test), failure
   signatures, concurrency, workflow validation, real git worktrees, real gate
@@ -101,12 +106,13 @@ Decisions taken while building this, including the six open questions from
 
 ## Next: the rest of M1
 
-What is left needs credentials: a Jira adapter reading a real ticket, a
-`ClaudeProvider` implementing the provider seam against
-`@anthropic-ai/claude-agent-sdk`, and the harvest/spec/plan phases calling real
-models. Everything those plug into — the workflow that configures them, the
-worktree they write in, the guardrails that constrain them, and the gates that
-judge them — is done and tested.
+`harvest` now runs for real. `spec` and `plan` follow the same shape and consume
+its digest; `implement` adds writes, which the guardrails already cover. A Jira
+adapter can wait — a pasted ticket description is enough to exercise everything.
+
+Credentials: the Agent SDK drives the Claude Code CLI, which resolves its own
+auth, so a developer already signed into Claude Code needs no API key. Runs bill
+to that account.
 
 The exit criterion is the one that matters: **one real, simple ticket becomes a
 real PR.** Do not proceed to M2 until that is genuinely useful on a real

@@ -223,3 +223,29 @@ Publishing requires registering the `buddhanag12` publisher at
 
 The id is what user settings and keybindings bind to, so it does not change
 again without breaking people.
+
+### D23 — Structured output is not optional for a phase the orchestrator consumes
+
+The first live harvest returned prose and failed its schema check, because
+`SessionOptions.outputSchema` was never passed through to the SDK's
+`outputFormat`. §6.3 lists structured output as a context-discipline measure,
+but it is stronger than that: a phase whose result the orchestrator *parses*
+cannot advance without it, so the wiring is load-bearing rather than an
+optimization.
+
+Two SDK-specific details that cost a run each to discover: `z.toJSONSchema()`
+stamps a `$schema` pointing at draft 2020-12 which the CLI's validator refuses
+to resolve, so the provider strips it; and the SDK is ESM-only against these
+CommonJS packages, so the runtime import has to stay opaque to TypeScript or it
+is downlevelled to `require()` and fails.
+
+### D24 — The spawned agent inherits the developer's Claude Code context
+
+The first successful harvest cited "user memory" in its risk list — it had read
+memory files belonging to the developer's own Claude Code session, despite
+`settingSources: []`.
+
+That is useful by accident and wrong by design: a run's behaviour would differ
+per machine, which breaks the reproducibility the replay model and the eval
+harness (§16.3) both depend on. Left as a known issue for now; the fix belongs
+with the phase executors, not the provider.

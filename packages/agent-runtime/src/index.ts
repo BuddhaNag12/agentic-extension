@@ -1,5 +1,7 @@
 export * from './guardrails/index.js';
 export * from './providers/types.js';
 export * from './providers/replay.js';
+export * from './providers/claude.js';
 export * from './prompts/compose.js';
 export * from './tools/askHuman.js';
+export * from './phases/harvest.js';
