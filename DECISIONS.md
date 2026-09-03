@@ -264,3 +264,29 @@ the frame text is not available to compare against yet.
 
 This is the cheapest anti-hallucination measure in the system, and the first live
 run produced eleven criteria that all passed it.
+
+### D26 — A task's check says how, not just which gate
+
+§5 Stage 4 requires every task to carry a machine-checkable acceptance
+criterion. Naming the gate alone (`"unit"`) is not enough to be falsifiable —
+any task can claim the unit gate covers it.
+
+So `TaskCheck` is `{gate, how}` where `how` states concretely what proves it: a
+named test case, a grep, a command scope. The live run produced checks like
+"`git diff --name-only` lists only packages/orchestrator/src/{...}" and
+"grep shows no environment or credential value interpolated into a log record".
+Those are verifiable claims; "the unit gate covers this" is not.
+
+This also feeds Appendix A's "tell the agent how it will be judged" — the
+implementer receives the exact command that will decide its work.
+
+### D27 — Planning is the expensive phase, and that is the right place to spend
+
+The first full run cost $1.54: harvest $0.15, spec $0.27, plan $1.12. Planning
+alone is more than twice the other two combined, because the planner runs on
+opus at xhigh effort while harvest runs on sonnet at low.
+
+That is the §15.1 model-routing lever working as intended rather than a problem
+to fix. A bad plan is paid for repeatedly in the repair loop; a good one is paid
+for once. Revisit only if the ratio moves after the implement phase exists and
+the true per-run total is known.

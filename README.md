@@ -46,6 +46,10 @@ exercised end to end before a single model call exists.
 - **Spec** (§5 Stage 2) — the specification, gated by SPEC_VALID: every
   acceptance criterion carries a verbatim quote that is checked against the
   ticket or the digest, so an invented requirement fails the gate
+- **Plan** (§5 Stage 4) — the task DAG, gated by PLAN_VALID's seven rules:
+  acyclic, coverage in both directions, every task machine-checkable, predicted
+  paths that exist, repro-test-first for bugs, and a split proposed rather than
+  attempted when over budget
 
 - 196 tests: state machine, replay (including a property test), failure
   signatures, concurrency, workflow validation, real git worktrees, real gate
@@ -109,9 +113,10 @@ Decisions taken while building this, including the six open questions from
 
 ## Next: the rest of M1
 
-`harvest` and `spec` now run for real, end to end — verified against this
-repository for $0.94. `plan` follows the same shape and consumes the spec;
-`implement` adds writes, which the guardrails already cover. A Jira
+`harvest`, `spec` and `plan` now run for real, end to end — verified against
+this repository for $1.54 a run, producing a three-task DAG with zero gate
+violations. `implement` is next; it adds writes, which the guardrails already
+cover. A Jira
 adapter can wait — a pasted ticket description is enough to exercise everything.
 
 Credentials: the Agent SDK drives the Claude Code CLI, which resolves its own

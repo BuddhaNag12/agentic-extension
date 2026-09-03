@@ -6,3 +6,4 @@ export * from './prompts/compose.js';
 export * from './tools/askHuman.js';
 export * from './phases/harvest.js';
 export * from './phases/spec.js';
+export * from './phases/plan.js';
