@@ -74,14 +74,37 @@ const RULES: Rule[] = [
   },
 ];
 
-/** Commands that are always safe to run unprompted (§7.4 Layer 2). */
+/**
+ * Commands that are always safe to run unprompted (§7.4 Layer 2).
+ *
+ * Deliberately broad for read-only inspection and the project's own build and
+ * test entry points. A list that is too narrow is not "safer": every miss is a
+ * denied call the agent must work around, which costs a turn and pushes it
+ * toward less legible commands.
+ */
 export const DEFAULT_SAFE_PREFIXES = [
+  // Inspection
   'ls', 'cat', 'head', 'tail', 'wc', 'find', 'grep', 'rg', 'sed -n', 'awk',
+  'diff', 'file', 'stat', 'basename', 'dirname', 'realpath', 'tree', 'du',
+  'sort', 'uniq', 'cut', 'tr', 'jq', 'test ', '[ ',
+  // Read-only git
   'git status', 'git log', 'git diff', 'git show', 'git blame', 'git branch',
-  'npm test', 'npm run', 'npx tsc', 'npx vitest', 'npx eslint',
-  './gradlew', 'mvn', 'cargo test', 'go test', 'pytest', 'make',
-  'node -e', 'node --version', 'echo', 'pwd', 'which',
+  'git ls-files', 'git rev-parse', 'git describe', 'git grep', 'git config --get',
+  // Build and test entry points
+  'npm test', 'npm run', 'npm ls', 'npx tsc', 'npx vitest', 'npx eslint', 'npx prettier',
+  'pnpm test', 'pnpm run', 'yarn test', 'yarn run',
+  './gradlew', 'gradle', 'mvn', 'cargo test', 'cargo check', 'cargo clippy',
+  'go test', 'go build', 'go vet', 'pytest', 'python -m pytest', 'make', 'tsc', 'vitest', 'eslint',
+  // Trivia
+  'node -e', 'node --version', 'node -v', 'echo', 'pwd', 'which', 'true', 'false', 'env | ',
 ];
+
+/**
+ * Navigation that only changes where a command runs. `cd x && npm test` was the
+ * single most common denied shape in the first live run; the target is still
+ * inside the worktree because the process cannot escape it.
+ */
+const NAVIGATION = /^cd\s+[^;&|]+$/;
 
 export function checkBash(command: string, safePrefixes: readonly string[] = DEFAULT_SAFE_PREFIXES): GuardrailDecision {
   const normalized = command.replace(/\s+/g, ' ').trim();
@@ -103,7 +126,9 @@ export function checkBash(command: string, safePrefixes: readonly string[] = DEF
     }
   }
 
-  if (segments.every((seg) => safePrefixes.some((p) => seg.startsWith(p)))) return ALLOW;
+  if (segments.every((seg) => NAVIGATION.test(seg) || safePrefixes.some((p) => seg.startsWith(p)))) {
+    return ALLOW;
+  }
   return ask('bash.unrecognized', `"${truncate(normalized)}" is not on the auto-approved list.`);
 }
 

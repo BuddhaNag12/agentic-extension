@@ -22,6 +22,7 @@ import { readLiveLock } from './lock.js';
  */
 
 process.env['AGENTFLOW_FAKE_TIME_SCALE'] = '0.02';
+process.env['AGENTFLOW_SIMULATE'] = '1';
 
 let root: string;
 let orchestrator: Orchestrator;

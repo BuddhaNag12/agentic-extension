@@ -42,6 +42,8 @@ export interface ImplementInput {
 export interface DeniedCall {
   tool: string;
   path?: string;
+  /** The bash command, when the refusal was of one — otherwise it cannot be audited. */
+  command?: string;
   rule: string;
   reason: string;
 }
@@ -105,9 +107,11 @@ export async function runImplement(
       // budget on exploration the task is supposed to do.
       if (rel && WRITE_TOOL_NAMES.has(call.tool)) filesTouched.add(rel);
     } else {
+      const command = typeof call.input['command'] === 'string' ? call.input['command'] : undefined;
       denied.push({
         tool: call.tool,
         ...(rel ? { path: rel } : {}),
+        ...(command ? { command } : {}),
         rule: decision.rule,
         reason: decision.reason,
       });

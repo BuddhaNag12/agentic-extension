@@ -114,9 +114,17 @@ To watch the whole pipeline in seconds rather than minutes:
 export AGENTFLOW_FAKE_TIME_SCALE=0.1
 ```
 
-> The UI still drives the **simulated** pipeline (`fakeDriver.ts`): its git
-> pushes, PRs and costs are scripted. The real phases below are not yet wired
-> into it — that is the last step of M1.
+The extension now drives the **real** phases: starting a run creates a git
+worktree and runs harvest, spec, plan, decompose, implement and verify in it,
+parking at the three human gates. `ship` is not implemented, so a run stops with
+its branch ready rather than opening a PR.
+
+Runs bill to your Claude Code account — budget roughly $3 for a small ticket.
+To drive the simulated pipeline instead (free, deterministic, for UI work):
+
+```bash
+export AGENTFLOW_SIMULATE=1
+```
 
 To install it into your own VS Code instead of the dev host:
 

@@ -15,10 +15,19 @@ import { HitlBroker } from './hitl.js';
 import { clearLock, writeLock } from './lock.js';
 import type { WorkspacePaths } from './paths.js';
 import { FakeRunDriver } from './runs/fakeDriver.js';
+import { RealRunDriver } from './runs/realDriver.js';
 import { RunStore } from './runs/store.js';
 import { Scheduler, limitsForMachine } from './scheduler.js';
 
 export const ORCHESTRATOR_VERSION = '0.0.1';
+
+/** What the daemon needs from a driver; both implementations satisfy it. */
+export interface RunDriver {
+  start(runId: string): void;
+  step(runId: string, trigger: Parameters<RunStore['apply']>[1]): void;
+  cancel(runId: string): void;
+  cancelAll(): void;
+}
 
 /**
  * The orchestrator daemon (§2.2). It owns scheduling, the state machine,
@@ -31,21 +40,37 @@ export class Orchestrator {
   private readonly store: RunStore;
   private readonly scheduler: Scheduler;
   private readonly hitl = new HitlBroker();
-  private readonly driver: FakeRunDriver;
+  private readonly driver: RunDriver;
   private server?: Server;
   private idleTimer?: NodeJS.Timeout;
 
   constructor(private readonly paths: WorkspacePaths) {
     this.store = new RunStore(paths);
     this.scheduler = new Scheduler(limitsForMachine(totalmem()));
-    this.driver = new FakeRunDriver(
-      this.store,
-      this.scheduler,
-      (runId, effects) => this.handleEffects(runId, effects),
-      (runId, question) => this.hitl.ask(runId, question).ok,
-    );
+    // Real by default; the simulated driver stays reachable for UI work and
+    // for the scenario tests, which must not spend money or call a model.
+    this.driver = process.env['AGENTFLOW_SIMULATE'] === '1'
+      ? new FakeRunDriver(
+          this.store,
+          this.scheduler,
+          (runId, effects) => this.handleEffects(runId, effects),
+          (runId, question) => this.hitl.ask(runId, question).ok,
+        )
+      : new RealRunDriver(
+          paths,
+          this.store,
+          this.scheduler,
+          (runId, effects) => this.handleEffects(runId, effects),
+        );
 
-    this.store.on('event', (payload) => this.broadcast(Notifications.event, payload));
+    this.store.on('event', (payload) => {
+      // A question reaching the log must also reach the inbox, whichever phase
+      // raised it — the UI renders from pending, not from the log (§7.2).
+      if (payload.event.t === 'question_asked') {
+        this.hitl.ask(payload.runId, payload.event.question);
+      }
+      this.broadcast(Notifications.event, payload);
+    });
     this.store.on('runUpdated', (run) => this.broadcast(Notifications.runUpdated, { run }));
     this.hitl.on('pendingChanged', () => this.broadcast(Notifications.pendingChanged, this.pendingPayload()));
   }

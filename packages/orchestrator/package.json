@@ -15,6 +15,8 @@
     "@agentflow/core": "0.0.1",
     "@agentflow/protocol": "0.0.1",
     "vscode-jsonrpc": "^8.2.1",
-    "zod": "^4.1.5"
+    "zod": "^4.1.5",
+    "@agentflow/agent-runtime": "0.0.1",
+    "@agentflow/gates": "0.0.1"
   }
 }

@@ -174,6 +174,27 @@ describe('bash policy (§7.4 Layer 3)', () => {
   it('asks about anything it does not recognize', () => {
     expect(checkBash('some-unknown-tool --flag')).toMatchObject({ decision: 'ask', rule: 'bash.unrecognized' });
   });
+
+  it('allows changing directory before a safe command', () => {
+    // The most common denied shape in the first live run — eleven times, each
+    // costing the agent a turn.
+    expect(checkBash('cd packages/core && npx vitest run src/format.test.ts')).toEqual({ decision: 'allow' });
+    expect(checkBash('cd packages/orchestrator && npm run typecheck')).toEqual({ decision: 'allow' });
+  });
+
+  it('still denies a destructive command after a cd', () => {
+    expect(checkBash('cd /tmp && rm -rf foo')).toMatchObject({ decision: 'deny' });
+  });
+
+  it('does not treat a cd with a chained secret read as navigation', () => {
+    expect(checkBash('cd /etc && cat .env')).toMatchObject({ decision: 'deny', rule: 'bash.credential_read' });
+  });
+
+  it('allows the read-only git and inspection commands a task actually uses', () => {
+    for (const c of ['git ls-files', 'git rev-parse HEAD', 'git grep TODO', 'jq .name package.json', 'sort -u x']) {
+      expect(checkBash(c), c).toEqual({ decision: 'allow' });
+    }
+  });
 });
 
 describe('anti-patterns (§9.3)', () => {

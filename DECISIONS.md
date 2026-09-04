@@ -321,3 +321,29 @@ run's implementer correctly reported it could not verify its own work, and was
 right. `WorktreeManager` now symlinks shared entries (§12.6) on create, and
 excludes them from `changedFiles` so infrastructure never reaches the review
 surface as a diff.
+
+### D31 — A driver runs the phase the run is in, it does not advance into it
+
+`RealRunDriver.start()` began with `step({kind:'advance'})`, which moved the run
+out of `intake` before intake's work ran. Intake is where the worktree is
+created, so harvest then executed with an undefined cwd — against the
+developer's own checkout rather than an isolated tree. It was read-only, so
+nothing was harmed, but the isolation the whole parallel model depends on was
+simply not in effect, and nothing said so.
+
+`start()` now runs the current phase, and `harvest` refuses to run without a
+worktree rather than silently falling back to the process's cwd. A phase that
+cannot have its isolation must fail, not proceed.
+
+### D32 — Phase transitions chain, they are not dropped
+
+A phase advances by calling `step` from inside its own execution, so the next
+phase is always requested while the current one is still in flight. The
+in-flight guard originally returned the running promise, which dropped the
+request and stalled every run after its first phase. Requests now chain.
+
+### D33 — The real driver is the default; simulation is opt-in
+
+`AGENTFLOW_SIMULATE=1` selects the fake driver. It is what the daemon tests and
+UI work use — they must be deterministic and free. Everything else gets the real
+phases, because a default that simulates is a default that lies.
