@@ -78,10 +78,50 @@ the rest of M1.
 what makes the state machine unit-testable in milliseconds and keeps a future
 CLI or web frontend possible (§17.1).
 
-## Running it
+## Build
 
 ```bash
-npm install && npm run build && npm test
+npm install
+```
+
+```bash
+npm run build
+```
+
+Everything else is a separate script, each independently runnable:
+
+| Command | What it does |
+|---|---|
+| `npm run build` | Compiles all packages, then bundles the extension and the daemon |
+| `npm run typecheck` | `tsc -b` across every package; no emit |
+| `npm test` | 253 tests (`npm run test:watch` to iterate) |
+| `npm run package` | Produces `agentflow.vsix` |
+| `npm run clean` | Removes `dist/` and build info |
+
+Node 20+ and git are the only prerequisites. Use **npm**, not yarn — the repo
+has a `package-lock.json` and no `yarn.lock`, and two lockfiles drift.
+
+## Run the extension
+
+Press <kbd>F5</kbd> in VS Code to launch an Extension Development Host with
+AgentFlow loaded. In the new window, run **AgentFlow: Start Run from Ticket**
+from the command palette, enter a key shaped like `PAY-1423`, and pick a
+workflow. The run parks three times waiting for you.
+
+To watch the whole pipeline in seconds rather than minutes:
+
+```bash
+export AGENTFLOW_FAKE_TIME_SCALE=0.1
+```
+
+> The UI still drives the **simulated** pipeline (`fakeDriver.ts`): its git
+> pushes, PRs and costs are scripted. The real phases below are not yet wired
+> into it — that is the last step of M1.
+
+To install it into your own VS Code instead of the dev host:
+
+```bash
+npm run package && code --install-extension agentflow.vsix
 ```
 
 The extension publishes as **`buddhanag12.agentflow`**. The publisher matters:
@@ -89,13 +129,38 @@ The extension publishes as **`buddhanag12.agentflow`**. The publisher matters:
 identity is `publisher.name` — so a sideloaded build published under `agentflow`
 can be silently replaced by that extension on an update sweep.
 
-Then press <kbd>F5</kbd> in VS Code to launch the extension host, and run
-**AgentFlow: Start Run from Ticket** from the command palette. Enter any key
-shaped like `PAY-1423`, pick a profile, and watch the run walk the pipeline.
-It will park three times waiting for you.
+## Run the real phases
 
-To watch the whole pipeline in a few seconds instead of a couple of minutes,
-set `AGENTFLOW_FAKE_TIME_SCALE=0.1` in the environment before launching.
+These call real models and write to a real git worktree. No API key is needed:
+the Agent SDK drives the Claude Code CLI, which resolves its own credentials, so
+being signed into Claude Code is enough. **Runs bill to that account** — budget
+roughly $1.50 for harvest → spec → plan, plus about $0.35 per implemented task.
+
+`harvest`, `spec` and `plan` are read-only and safe to run against any checkout.
+`implement` writes, so give it a worktree:
+
+```javascript
+const { ClaudeProvider, runHarvest } = require('@agentflow/agent-runtime');
+const { BUILT_IN_WORKFLOWS } = require('@agentflow/core');
+
+const result = await runHarvest(new ClaudeProvider(), {
+  ticketKey: 'AF-1',
+  ticketDescription: 'Add a Commands pane to the run detail view.',
+  worktree: process.cwd(),
+  workflow: BUILT_IN_WORKFLOWS.find((w) => w.name === 'feature'),
+});
+console.log(result.digest.likelyTouchSet);
+```
+
+A worktree for a writing phase, isolated from your checkout and sharing its
+`node_modules` so gates can run:
+
+```javascript
+const { WorktreeManager } = require('@agentflow/orchestrator');
+const tree = await new WorktreeManager(process.cwd()).create({
+  ticketKey: 'AF-1', baseRef: 'main',
+});
+```
 
 ## Where things live
 
