@@ -1,6 +1,7 @@
-import type {
-  ApprovalRequest, ArtifactKind, ArtifactRef, CostLedger,
-  Phase, Question, RunEvent, RunStatus, TaskStatus,
+import {
+  PHASE_OF_STEP,
+  type ApprovalRequest, type ArtifactKind, type ArtifactRef, type CostLedger,
+  type Phase, type Question, type RunEvent, type RunStatus, type Step, type TaskStatus,
 } from '@agentflow/protocol';
 
 /**
@@ -19,8 +20,10 @@ export interface ReplayState {
   ticketKey?: string;
   branch?: string;
   phase: Phase;
+  step?: Step;
   status: RunStatus;
   phasesVisited: Phase[];
+  stepsVisited: Step[];
   artifacts: Partial<Record<ArtifactKind, ArtifactRef>>;
   tasks: Record<string, { status: TaskStatus; attempts: number }>;
   openQuestions: Question[];
@@ -39,8 +42,10 @@ export interface ReplayState {
 export function emptyState(): ReplayState {
   return {
     phase: 'intake',
+    step: 'classify',
     status: 'queued',
     phasesVisited: [],
+    stepsVisited: [],
     artifacts: {},
     tasks: {},
     openQuestions: [],
@@ -63,12 +68,32 @@ export function apply(state: ReplayState, e: RunEvent): ReplayState {
     case 'run_created':
       return { ...s, runId: e.runId, ticketKey: e.ticketKey, branch: e.branch, startedAt: e.at };
 
-    case 'phase_entered':
+    case 'phase_entered': {
+      // Entering a phase clears the step: the step that ran in the previous
+      // phase does not belong to this one, and a migrated log — which carries
+      // the phase change without a following step — would otherwise report an
+      // impossible pair like `ship/human_review`. The live path always writes
+      // `step_entered` straight after, so nothing is lost.
+      const { step: _stale, ...rest } = s;
       return {
-        ...s,
+        ...rest,
         phase: e.phase,
         phasesVisited: s.phasesVisited.at(-1) === e.phase ? s.phasesVisited : [...s.phasesVisited, e.phase],
       };
+    }
+
+    // A step implies its phase, so a log carrying only steps — which is what a
+    // migrated pre-2.0.0 log looks like — still reconstructs the phase board.
+    case 'step_entered': {
+      const phase = PHASE_OF_STEP[e.step];
+      return {
+        ...s,
+        phase,
+        step: e.step,
+        phasesVisited: s.phasesVisited.at(-1) === phase ? s.phasesVisited : [...s.phasesVisited, phase],
+        stepsVisited: s.stepsVisited.at(-1) === e.step ? s.stepsVisited : [...s.stepsVisited, e.step],
+      };
+    }
 
     case 'status_changed':
       return { ...s, status: e.status };

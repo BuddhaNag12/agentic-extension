@@ -1,17 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import { failureSignature, type Effect } from '@agentflow/core';
-import type { Phase, Question } from '@agentflow/protocol';
+import type { Question, Step } from '@agentflow/protocol';
 import type { RunStore } from './store.js';
 import type { Scheduler } from '../scheduler.js';
 
 /**
- * M0's stand-in for real phase work. It emits the same event shapes a real
- * worker will, at plausible rates, so the UI, the event log, replay and the
- * gate/approval plumbing are all exercised end to end before a single model
- * call exists. M1 replaces this with real workers; the events do not change.
+ * The simulated driver. It emits the same event shapes a real worker does, at
+ * plausible rates, so the UI, the event log, replay and the gate/approval
+ * plumbing can all be exercised deterministically and for free — which is what
+ * the daemon tests and UI work need. `RealRunDriver` is the default; this is
+ * selected by `AGENTFLOW_SIMULATE=1` (DECISIONS D33).
  */
 
-interface Step {
+interface Beat {
   after: number;
   emit: (ctx: DriverContext) => void;
 }
@@ -26,10 +27,29 @@ interface DriverContext {
   ask: (question: Question) => void;
 }
 
-const PHASE_SCRIPT: Partial<Record<Phase, Step[]>> = {
-  intake: [
+const STEP_SCRIPT: Partial<Record<Step, Beat[]>> = {
+  classify: [
     { after: 200, emit: (c) => c.tool('jira.getIssue', 'fetched issue and 4 comments') },
     { after: 250, emit: (c) => { c.say('classified as feature'); c.spend(0.004); } },
+  ],
+  map_repo: [
+    { after: 150, emit: (c) => c.say('mapped to the configured repo on origin/main') },
+  ],
+  check_auth: [
+    { after: 120, emit: (c) => c.say('integration auth valid') },
+  ],
+  worktree: [
+    { after: 200, emit: (c) => c.store.emitEvent(c.store.get(c.runId)!, { t: 'checkpoint', label: 'worktree agentflow branch', commitSha: 'f0e1d2c' }) },
+  ],
+  detect_gates: [
+    { after: 150, emit: (c) => c.say('gate adapters detected: compile, lint, unit') },
+  ],
+  check_budget: [
+    { after: 100, emit: (c) => c.say('budget: $8 and 90 minutes') },
+  ],
+  baseline_gates: [
+    { after: 300, emit: (c) => gate(c, 'compile', true, 1_300) },
+    { after: 400, emit: (c) => { gate(c, 'unit', true, 3_900); c.say('baseline is green'); } },
   ],
   harvest: [
     { after: 300, emit: (c) => c.tool('subagent:repo-cartographer', 'mapped 12 modules') },
@@ -37,11 +57,11 @@ const PHASE_SCRIPT: Partial<Record<Phase, Step[]>> = {
     { after: 300, emit: (c) => { c.tool('subagent:history-archaeologist', '2 prior PRs in this area'); c.spend(0.21); } },
     { after: 200, emit: (c) => c.store.emitEvent(c.store.get(c.runId)!, { t: 'artifact_written', kind: 'context', version: 1, path: 'artifacts/context.v1.json' }) },
   ],
-  spec: [
+  draft_spec: [
     { after: 400, emit: (c) => c.say('drafting spec from ticket + context') },
     { after: 500, emit: (c) => { c.store.emitEvent(c.store.get(c.runId)!, { t: 'artifact_written', kind: 'spec', version: 1, path: 'artifacts/spec.v1.json' }); c.spend(0.42); } },
   ],
-  clarify: [
+  questions: [
     {
       after: 300,
       emit: (c) => c.ask({
@@ -56,13 +76,16 @@ const PHASE_SCRIPT: Partial<Record<Phase, Step[]>> = {
         allowFreeText: true,
         blocking: true,
         confidenceWithoutAnswer: 0.4,
-        phase: 'clarify',
+        phase: 'context',
       }),
     },
   ],
-  plan: [
+  draft_plan: [
     { after: 400, emit: (c) => c.say('compiling task DAG') },
     { after: 400, emit: (c) => { c.store.emitEvent(c.store.get(c.runId)!, { t: 'artifact_written', kind: 'plan', version: 1, path: 'artifacts/plan.v1.json' }); c.spend(0.55); } },
+  ],
+  validate_plan: [
+    { after: 200, emit: (c) => c.say('PLAN_VALID passed all seven rules') },
   ],
   decompose: [
     { after: 200, emit: (c) => c.say('compiled 3 work packets') },
@@ -79,16 +102,21 @@ const PHASE_SCRIPT: Partial<Record<Phase, Step[]>> = {
     { after: 300, emit: (c) => gate(c, 'lint', true, 900) },
     { after: 500, emit: (c) => gate(c, 'unit', true, 4_200) },
   ],
-  review: [
+  auto_review: [
     { after: 500, emit: (c) => c.tool('subagent:correctness', 'no blocking findings') },
     { after: 400, emit: (c) => { c.tool('subagent:security', 'no blocking findings'); c.store.emitEvent(c.store.get(c.runId)!, { t: 'artifact_written', kind: 'review', version: 1, path: 'artifacts/review.v1.json' }); c.spend(0.61); } },
   ],
-  human_review: [
+  triage_findings: [
     { after: 200, emit: (c) => c.say('assembled diff, gate reports and plan conformance') },
   ],
-  ship: [
-    { after: 300, emit: (c) => c.tool('git.push', 'pushed agentflow branch') },
-    { after: 300, emit: (c) => c.tool('github.createPR', 'opened PR #4821') },
+  // §5.8: ship prepares the branch and stops. `push`, `publish` and `notify`
+  // are gated behind autoPush and are not scripted, because simulating an
+  // outbound action the tool does not take by default is exactly the kind of
+  // convincing fiction that made someone ask which origin the PR went to.
+  rebase: [
+    { after: 300, emit: (c) => c.tool('git.rebase', 'rebased onto origin/main, no conflicts') },
+    { after: 400, emit: (c) => gate(c, 'unit', true, 4_100) },
+    { after: 300, emit: (c) => c.say('PR package written to artifacts/pr-package.md — ready for you to push') },
   ],
 };
 
@@ -115,20 +143,20 @@ export class FakeRunDriver {
     private readonly timeScale = Number(process.env['AGENTFLOW_FAKE_TIME_SCALE'] ?? 1),
   ) {}
 
-  /** Kick a run off at its current phase. */
+  /** Kick a run off at its current step. */
   start(runId: string): void {
-    this.step(runId, { kind: 'advance' });
+    this.step(runId, { kind: 'start' });
   }
 
-  /** Apply a trigger, then drive whatever phase we land in. */
+  /** Apply a trigger, then drive whatever step we land in. */
   step(runId: string, trigger: Parameters<RunStore['apply']>[1]): void {
     const result = this.store.apply(runId, trigger);
     if (!result.ok) return;
     this.onEffects(runId, result.effects);
 
     const handle = this.store.get(runId);
-    if (!handle || handle.machine.status !== 'running') return;
-    this.runPhase(runId, handle.machine.phase);
+    if (!handle?.machine.step || handle.machine.status !== 'running') return;
+    this.runStep(runId, handle.machine.step);
   }
 
   cancel(runId: string): void {
@@ -140,36 +168,39 @@ export class FakeRunDriver {
     for (const runId of [...this.timers.keys()]) this.cancel(runId);
   }
 
-  private runPhase(runId: string, phase: Phase): void {
-    const script = PHASE_SCRIPT[phase] ?? [];
+  private runStep(runId: string, step: Step): void {
+    // A run parked at G3 sits in `human_review` and must not be driven on:
+    // the machine is waiting for a person, not for the script.
+    if (step === 'human_review') return;
+
+    const script = STEP_SCRIPT[step] ?? [];
     const ctx = this.context(runId);
     const timers: NodeJS.Timeout[] = [];
     let elapsed = 0;
 
-    for (const step of script) {
-      elapsed += step.after * this.timeScale;
+    for (const beat of script) {
+      elapsed += beat.after * this.timeScale;
       timers.push(setTimeout(() => {
-        if (this.store.get(runId)?.machine.status === 'running') step.emit(ctx);
+        if (this.store.get(runId)?.machine.status === 'running') beat.emit(ctx);
       }, elapsed));
     }
 
-    // Phase work is done — ask the machine what happens next. Gates run under
-    // their own semaphore so parallel runs cannot all build at once (§4.3).
+    // The step's work is done — ask the machine what happens next. Gates run
+    // under their own semaphore so parallel runs cannot all build at once (§4.3).
     timers.push(setTimeout(() => {
       const handle = this.store.get(runId);
       if (!handle || handle.machine.status !== 'running') return;
-      void this.finishPhase(runId, phase);
+      void this.finishStep(runId, step);
     }, elapsed + 300 * this.timeScale));
 
     this.timers.set(runId, [...(this.timers.get(runId) ?? []), ...timers]);
   }
 
-  private async finishPhase(runId: string, phase: Phase): Promise<void> {
-    const trigger = exitTrigger(phase);
-    if (phase === 'verify') {
+  private async finishStep(runId: string, step: Step): Promise<void> {
+    if (step === 'verify' || step === 'baseline_gates') {
       await this.scheduler.gates.run(async () => { /* held for the gate's duration */ });
     }
-    this.step(runId, trigger);
+    this.step(runId, exitTrigger(step));
   }
 
   private context(runId: string): DriverContext {
@@ -198,11 +229,11 @@ export class FakeRunDriver {
   }
 }
 
-/** How each phase reports completion. Verify and review report evidence. */
-function exitTrigger(phase: Phase): Parameters<RunStore['apply']>[1] {
-  switch (phase) {
+/** How each step reports completion. Verify and review report evidence. */
+function exitTrigger(step: Step): Parameters<RunStore['apply']>[1] {
+  switch (step) {
     case 'verify': return { kind: 'gate_passed', gate: 'unit' };
-    case 'review': return { kind: 'review_findings', blocking: 0 };
+    case 'auto_review': return { kind: 'review_findings', blocking: 0 };
     default: return { kind: 'advance' };
   }
 }

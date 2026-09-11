@@ -6,7 +6,9 @@ import { z } from 'zod';
  * (the model's `outputFormat`). See architecture doc §17.2.
  */
 
-export const SCHEMA_VERSION = '1.0.0';
+/** 2.0.0 condensed the fourteen-phase vocabulary into §5.1's seven phases
+ *  plus a `Step`. Logs written before it are migrated on read. */
+export const SCHEMA_VERSION = '2.0.0';
 
 // --- identifiers -----------------------------------------------------------
 
@@ -18,15 +20,49 @@ export const RepoId = z.string().min(1);
 // --- phases ----------------------------------------------------------------
 
 /**
- * `wait_for_ci` is present per the §20.3 recommendation (local gates in the
- * loop, CI as pre-ship truth). It is skipped unless config enables it.
+ * The seven phases the human sees (§5.1) — one pill each on the board. There
+ * is no terminal `done` phase: a finished run sits at its last phase with a
+ * terminal `RunStatus`, which is the only place completion is recorded.
  */
 export const Phase = z.enum([
-  'intake', 'harvest', 'spec', 'clarify', 'plan',
-  'decompose', 'implement', 'verify', 'repair',
-  'review', 'wait_for_ci', 'human_review', 'ship', 'done',
+  'intake', 'preflight', 'context', 'plan', 'build', 'review', 'ship',
 ]);
 export type Phase = z.infer<typeof Phase>;
+
+/**
+ * What the engine tracks *inside* a phase (§3.1). Never rendered as a
+ * top-level pill — the run detail shows steps, the board shows phases.
+ *
+ * `repair` and `human_review` are reachable only by trigger, so they are
+ * absent from `STEP_ORDER` while still being real steps a run can sit in.
+ */
+export const Step = z.enum([
+  'classify', 'map_repo',
+  'check_auth', 'worktree', 'detect_gates', 'check_budget', 'baseline_gates',
+  'harvest', 'draft_spec', 'questions',
+  'draft_plan', 'validate_plan', 'decompose',
+  'implement', 'verify', 'repair',
+  'auto_review', 'triage_findings', 'human_review',
+  'rebase', 'push', 'publish', 'notify',
+]);
+export type Step = z.infer<typeof Step>;
+
+/** Which phase owns each step. A `step_entered` event therefore implies its
+ *  phase, which is what lets a legacy phase name migrate to a step (§3.3). */
+export const PHASE_OF_STEP: Record<Step, Phase> = {
+  classify: 'intake', map_repo: 'intake',
+  check_auth: 'preflight', worktree: 'preflight', detect_gates: 'preflight',
+  check_budget: 'preflight', baseline_gates: 'preflight',
+  harvest: 'context', draft_spec: 'context', questions: 'context',
+  draft_plan: 'plan', validate_plan: 'plan', decompose: 'plan',
+  implement: 'build', verify: 'build', repair: 'build',
+  auto_review: 'review', triage_findings: 'review', human_review: 'review',
+  rebase: 'ship', push: 'ship', publish: 'ship', notify: 'ship',
+};
+
+/** Deliver turns a ticket into a branch; review reads a PR (§1.1, §7). */
+export const Pipeline = z.enum(['deliver', 'review']);
+export type Pipeline = z.infer<typeof Pipeline>;
 
 export const RunStatus = z.enum([
   'queued', 'running', 'waiting_human', 'blocked',
@@ -34,7 +70,9 @@ export const RunStatus = z.enum([
 ]);
 export type RunStatus = z.infer<typeof RunStatus>;
 
-export const PipelineProfile = z.enum(['feature', 'bug', 'chore', 'refactor', 'spike']);
+export const PipelineProfile = z.enum([
+  'feature', 'bug', 'chore', 'refactor', 'spike', 'pr-review', 'pr-fix',
+]);
 export type PipelineProfile = z.infer<typeof PipelineProfile>;
 
 export const GateId = z.string().min(1);
@@ -215,6 +253,8 @@ export const Run = z.object({
   /** Name of the workflow (§21) that selects this run's phases, gates and agents. */
   workflow: z.string().default('feature'),
   phase: Phase,
+  /** Absent while a run is queued and nothing inside a phase has started. */
+  step: Step.optional(),
   status: RunStatus,
   attemptBudget: AttemptBudget,
   cost: CostLedger,

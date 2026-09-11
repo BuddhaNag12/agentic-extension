@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline';
 import { dirname } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { RunEvent, type NewRunEvent } from '@agentflow/protocol';
+import { emptyMigrationCount, migrateRawEvent, type MigrationCount } from './migrate.js';
 
 /**
  * Append-only JSONL event log (§3.3). This is the source of truth for a run:
@@ -14,6 +15,8 @@ import { RunEvent, type NewRunEvent } from '@agentflow/protocol';
 export class EventLog {
   private seq = 0;
   private readonly emitter = new EventEmitter();
+  /** What the last read had to bring forward from an older schema (§3.3). */
+  readonly migrations: MigrationCount = emptyMigrationCount();
 
   private constructor(readonly path: string, seq: number) {
     this.seq = seq;
@@ -45,7 +48,10 @@ export class EventLog {
   }
 
   readAll(): RunEvent[] {
-    return existsSync(this.path) ? readAllSync(this.path) : [];
+    if (!existsSync(this.path)) return [];
+    this.migrations.migrated = 0;
+    this.migrations.dropped = 0;
+    return readAllSync(this.path, this.migrations);
   }
 
   readSince(seq: number): RunEvent[] {
@@ -62,16 +68,16 @@ export class EventLog {
     if (!existsSync(this.path)) return;
     const rl = createInterface({ input: createReadStream(this.path, 'utf8'), crlfDelay: Infinity });
     for await (const line of rl) {
-      const e = parseLine(line);
+      const e = parseLine(line, this.migrations);
       if (e && e.seq >= sinceSeq) yield e;
     }
   }
 }
 
-function readAllSync(path: string): RunEvent[] {
+function readAllSync(path: string, migrations?: MigrationCount): RunEvent[] {
   const out: RunEvent[] = [];
   for (const line of readFileSync(path, 'utf8').split('\n')) {
-    const e = parseLine(line);
+    const e = parseLine(line, migrations);
     if (e) out.push(e);
   }
   return out;
@@ -82,11 +88,14 @@ function readAllSync(path: string): RunEvent[] {
  * can be malformed is a truncated tail from a killed process, and losing the
  * last event is always better than refusing to open the log at all.
  */
-function parseLine(line: string): RunEvent | undefined {
+function parseLine(line: string, migrations?: MigrationCount): RunEvent | undefined {
   const trimmed = line.trim();
   if (!trimmed) return undefined;
   try {
-    const parsed = RunEvent.safeParse(JSON.parse(trimmed));
+    const raw = migrateRawEvent(JSON.parse(trimmed), migrations);
+    if (raw === undefined) return undefined;
+    const parsed = RunEvent.safeParse(raw);
+    if (!parsed.success && migrations) migrations.dropped += 1;
     return parsed.success ? parsed.data : undefined;
   } catch {
     return undefined;

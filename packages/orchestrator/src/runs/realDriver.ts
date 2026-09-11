@@ -5,22 +5,26 @@ import {
 } from '@agentflow/agent-runtime';
 import { GateRegistry, runGate, type GateAdapter } from '@agentflow/gates';
 import { failureSignature, type Effect } from '@agentflow/core';
-import type { Phase } from '@agentflow/protocol';
+import type { Step } from '@agentflow/protocol';
 import type { WorkspacePaths } from '../paths.js';
 import { WorktreeManager } from '../git/worktree.js';
 import type { Scheduler } from '../scheduler.js';
 import type { RunStore } from './store.js';
 
 /**
- * Drives a run through the real phases (§5). Same surface as the fake driver,
+ * Drives a run through the real steps (§5). Same surface as the fake driver,
  * so the daemon and every UI view are unchanged — the fake was built to emit
  * exactly these events.
  *
- * Phase work is asynchronous and long. The machine still decides every
- * transition: this only performs the work and reports evidence.
+ * Dispatch is per *step*, not per phase: a phase is a pill on the board, and
+ * several distinct pieces of work happen inside one. Step work is asynchronous
+ * and long. The machine still decides every transition; this only performs the
+ * work and reports evidence.
  */
 
 export interface RunArtifacts {
+  /** Gates already red on the untouched base (§5.3), excluded from blame. */
+  baselineFailures?: string[];
   digest?: ContextDigest;
   spec?: Spec;
   plan?: Plan;
@@ -44,16 +48,14 @@ export class RealRunDriver {
   ) {}
 
   /**
-   * Runs the phase the run is *currently* in. Advancing first would skip
-   * `intake` entirely — and intake is where the worktree is created, so every
-   * later phase would run against the developer's own checkout instead of an
-   * isolated tree.
+   * Runs the step the run is *currently* in. Advancing first would skip the
+   * head of the pipeline entirely — and preflight is where the worktree is
+   * created, so every later step would run against the developer's own
+   * checkout instead of an isolated tree (DECISIONS D31).
    */
   start(runId: string): void {
     this.cancelled.delete(runId);
-    const handle = this.store.get(runId);
-    if (!handle) return;
-    void this.enqueue(runId, handle.machine.phase);
+    this.step(runId, { kind: 'start' });
   }
 
   step(runId: string, trigger: Parameters<RunStore['apply']>[1]): void {
@@ -62,8 +64,8 @@ export class RealRunDriver {
     this.onEffects(runId, result.effects);
 
     const handle = this.store.get(runId);
-    if (!handle || handle.machine.status !== 'running') return;
-    void this.enqueue(runId, handle.machine.phase);
+    if (!handle?.machine.step || handle.machine.status !== 'running') return;
+    void this.enqueue(runId, handle.machine.step);
   }
 
   cancel(runId: string): void {
@@ -75,15 +77,15 @@ export class RealRunDriver {
   }
 
   /**
-   * One phase at a time per run, chained rather than dropped. A phase advances
-   * by calling `step` from inside its own execution, so the next phase is
-   * always requested while the current one is still in flight — dropping it
-   * would stall the run after its first phase.
+   * One step at a time per run, chained rather than dropped. A step advances
+   * by calling `step` from inside its own execution, so the next one is always
+   * requested while the current is still in flight — dropping it would stall
+   * the run after its first step (DECISIONS D32).
    */
-  private enqueue(runId: string, phase: Phase): Promise<void> {
+  private enqueue(runId: string, step: Step): Promise<void> {
     const prior = this.inFlight.get(runId) ?? Promise.resolve();
     const work = prior
-      .then(() => this.runPhase(runId, phase))
+      .then(() => this.runStep(runId, step))
       .catch((err) => this.fail(runId, err))
       .finally(() => {
         if (this.inFlight.get(runId) === work) this.inFlight.delete(runId);
@@ -92,7 +94,7 @@ export class RealRunDriver {
     return work;
   }
 
-  private async runPhase(runId: string, phase: Phase): Promise<void> {
+  private async runStep(runId: string, step: Step): Promise<void> {
     if (this.cancelled.has(runId)) return;
     const handle = this.store.get(runId);
     if (!handle) return;
@@ -110,8 +112,25 @@ export class RealRunDriver {
       });
     const stream = (turn: AgentTurn) => this.emitTurn(runId, turn);
 
-    switch (phase) {
-      case 'intake': {
+    switch (step) {
+      // --- intake (§5.2) -----------------------------------------------------
+      case 'classify':
+        // A pasted description is already classified by the chosen workflow;
+        // a Jira adapter and a real triage agent land with the Work Inbox.
+        say(`starting ${handle.run.ticket.key} on the ${handle.run.workflow} workflow`);
+        return this.step(runId, { kind: 'advance' });
+
+      case 'map_repo':
+        say(`mapped to ${handle.run.repo.path} on ${handle.run.repo.baseRef}`);
+        return this.step(runId, { kind: 'advance' });
+
+      // --- preflight (§5.3) --------------------------------------------------
+      case 'check_auth':
+        // The Agent SDK drives the Claude Code CLI, which resolves its own
+        // credentials; Jira/GitHub auth arrives with the integration layer.
+        return this.step(runId, { kind: 'advance' });
+
+      case 'worktree': {
         const tree = new WorktreeManager(this.paths.root);
         say(`preparing an isolated worktree for ${handle.run.ticket.key}`);
         const info = await tree.create({
@@ -130,8 +149,48 @@ export class RealRunDriver {
         return this.step(runId, { kind: 'advance' });
       }
 
+      case 'detect_gates': {
+        if (!state.worktree) return this.block(runId, 'no worktree: preflight did not complete');
+        const detected = this.gates.detect({ root: state.worktree, files: [] });
+        say(detected.length > 0
+          ? `gate adapters detected: ${detected.map((a) => a.id).join(', ')}`
+          : 'no gate adapter matched this repository');
+        return this.step(runId, { kind: 'advance' });
+      }
+
+      case 'check_budget':
+        say(`budget: $${workflow.budgets.perRunUsd} and ${workflow.budgets.perTicketMinutes} minutes`);
+        return this.step(runId, { kind: 'advance' });
+
+      case 'baseline_gates': {
+        // §5.3's highest-value check: failures already present on the base are
+        // recorded now so the implementer is not blamed for a broken main and
+        // does not burn its repair budget chasing them.
+        if (!state.worktree) return this.block(runId, 'no worktree: preflight did not complete');
+        const { adapters } = this.gates.resolve(workflow.pipeline.gates.required);
+        const baseline: string[] = [];
+        if (adapters.length === 0) say('no gate adapter for the required gates; baseline unknown');
+        for (const adapter of adapters) {
+          const report = await this.scheduler.gates.run(() => this.runOne(runId, adapter, state));
+          this.store.emitEvent(handle, {
+            t: 'gate_result', gate: adapter.id, ok: report.ok,
+            durationMs: report.durationMs, report,
+          });
+          if (!report.ok) baseline.push(adapter.id);
+        }
+        if (baseline.length > 0) {
+          this.store.emitEvent(handle, {
+            t: 'log', level: 'warn',
+            message: `baseline already failing: ${baseline.join(', ')} — excluded from the blocking set`,
+          });
+        }
+        this.artifacts.set(runId, { ...state, baselineFailures: baseline });
+        return this.step(runId, { kind: 'advance' });
+      }
+
+      // --- context (§5.4) ----------------------------------------------------
       case 'harvest': {
-        if (!state.worktree) return this.block(runId, 'no worktree: intake did not complete');
+        if (!state.worktree) return this.block(runId, 'no worktree: preflight did not complete');
         const r = await runHarvest(this.provider, {
           ticketKey: handle.run.ticket.key,
           ticketDescription: handle.run.ticket.summary,
@@ -145,7 +204,7 @@ export class RealRunDriver {
         return this.step(runId, { kind: 'advance' });
       }
 
-      case 'spec': {
+      case 'draft_spec': {
         const r = await runSpec(this.provider, {
           ticketKey: handle.run.ticket.key,
           ticketDescription: handle.run.ticket.summary,
@@ -168,7 +227,7 @@ export class RealRunDriver {
             question: {
               id: q.id, question: q.question, whyItMatters: q.whyItMatters,
               alreadyChecked: q.alreadyChecked, blocking: q.blocking,
-              allowFreeText: true, confidenceWithoutAnswer: 0.5, phase: 'clarify',
+              allowFreeText: true, confidenceWithoutAnswer: 0.5, phase: 'context',
               ...(q.options ? { options: q.options } : {}),
             },
           });
@@ -176,11 +235,13 @@ export class RealRunDriver {
         return this.step(runId, { kind: 'advance' });
       }
 
-      case 'clarify':
-        // Questions were raised with the spec; the gate parks the run.
+      case 'questions':
+        // Questions were raised with the spec; G1 parks the run on this step's
+        // exit, so there is nothing further to do here.
         return this.step(runId, { kind: 'advance' });
 
-      case 'plan': {
+      // --- plan (§5.5) -------------------------------------------------------
+      case 'draft_plan': {
         const r = await runPlan(this.provider, {
           ticketKey: handle.run.ticket.key,
           spec: state.spec!, digest: state.digest!,
@@ -202,6 +263,12 @@ export class RealRunDriver {
         return this.step(runId, { kind: 'advance' });
       }
 
+      case 'validate_plan':
+        // PLAN_VALID ran inside `draft_plan`, which is what let a violation
+        // retry the planner. Reaching here means it passed; G2 parks the run.
+        say('PLAN_VALID passed; the plan is ready for approval');
+        return this.step(runId, { kind: 'advance' });
+
       case 'decompose': {
         const packets = decompose({
           plan: state.plan!, spec: state.spec!, digest: state.digest!, workflow,
@@ -211,6 +278,7 @@ export class RealRunDriver {
         return this.step(runId, { kind: 'advance' });
       }
 
+      // --- build (§5.6) ------------------------------------------------------
       case 'implement': {
         for (const packet of state.packets ?? []) {
           if (this.cancelled.has(runId)) return;
@@ -261,24 +329,39 @@ export class RealRunDriver {
           : { kind: 'gate_failed', gate: 'ladder' });
       }
 
-      case 'review':
-        // The four-pass reviewer is M4. Until then the run reaches the human
-        // with gate evidence and no automated findings — honestly empty rather
-        // than a fabricated pass.
-        say('automated review is not implemented yet (M4); proceeding on gate evidence alone');
+      case 'repair':
+        // The bounded convergence loop is §11 and lands with the correctness
+        // engine. Until then a failed gate is a stop, not a silent retry.
+        return this.block(runId, 'the repair loop is not implemented yet — gates are red');
+
+      // --- review (§5.7) -----------------------------------------------------
+      case 'auto_review':
+        // The four-pass cold reviewer lands with the review engine. Until then
+        // the run reaches the human with gate evidence and no automated
+        // findings — honestly empty rather than a fabricated pass.
+        say('automated review is not implemented yet; proceeding on gate evidence alone');
         return this.step(runId, { kind: 'review_findings', blocking: 0 });
 
-      case 'human_review':
+      case 'triage_findings':
         say('assembled the diff and gate reports for review');
         return this.step(runId, { kind: 'advance' });
 
-      case 'ship':
-        // Commit, push and PR land with the ship phase; stopping here is the
+      case 'human_review':
+        // G3 parks the run on this step. Nothing runs while a human holds it.
+        return;
+
+      // --- ship (§5.8) -------------------------------------------------------
+      case 'rebase':
+        // Rebase, the re-run of the ladder on the rebased tree, and the PR
+        // package are the rest of the deliver slice. Stopping here is the
         // honest outcome rather than reporting a PR that does not exist.
         return this.block(runId, 'ship is not implemented yet — the branch is ready in the worktree');
 
-      default:
-        return;
+      case 'push':
+      case 'publish':
+      case 'notify':
+        // Only reachable with autoPush on, which §5.8 leaves off by default.
+        return this.block(runId, `${step} is not implemented: push and open the PR yourself`);
     }
   }
 

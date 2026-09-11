@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { GateId, HumanGate, Phase } from './domain.js';
+import { GateId, HumanGate, Phase, Step } from './domain.js';
 import { AgentRole, Effort, ModelAlias, ThinkingMode } from './models.js';
 
 /**
@@ -9,7 +9,10 @@ import { AgentRole, Effort, ModelAlias, ThinkingMode } from './models.js';
  * no privileged built-ins.
  */
 
-export const WORKFLOW_SCHEMA_VERSION = '1.0.0';
+/** 2.0.0 moved `pipeline.skip` onto §5.1's seven phases and added
+ *  `skipSteps`. Built-in definitions on disk at an older version are reseeded
+ *  rather than left to fail validation against a vocabulary they predate. */
+export const WORKFLOW_SCHEMA_VERSION = '2.0.0';
 
 /** Lowercase slug: it names a file and appears in the RPC contract. */
 export const WorkflowName = z.string().regex(
@@ -31,6 +34,15 @@ export type AgentBinding = z.infer<typeof AgentBinding>;
 
 export const WorkflowPipeline = z.object({
   skip: z.array(Phase).default([]),
+  /**
+   * Steps omitted without dropping the phase around them. This is how a
+   * profile skips work that has no gate attached to it — a spike has no diff,
+   * so `auto_review` is pointless, but G3 still asks "are these findings
+   * good?" and therefore `review` must still run (DECISIONS D11).
+   */
+  skipSteps: z.array(Step).default([]),
+  /** Reserved for the §5.8 pre-push CI wait. It no longer selects a phase:
+   *  ship re-runs the ladder on the rebased tree itself (DECISIONS D34). */
   waitForCi: z.boolean().default(false),
   gates: z.object({
     required: z.array(GateId).default([]),

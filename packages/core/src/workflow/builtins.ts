@@ -1,7 +1,7 @@
-import type { WorkflowDefinition } from '@agentflow/protocol';
+import { WORKFLOW_SCHEMA_VERSION, type WorkflowDefinition } from '@agentflow/protocol';
 
 /**
- * The five profiles from §5.10, expressed as workflow definitions rather than
+ * The five profiles from §5.9, expressed as workflow definitions rather than
  * as branches in a switch. They are materialized to `.agentflow/workflows/` on
  * first run so they are readable and forkable, and they load through exactly
  * the same path as a user-authored workflow.
@@ -24,9 +24,12 @@ const DEFAULT_AGENTS: WorkflowDefinition['agents'] = {
 const base = (over: Partial<WorkflowDefinition>): WorkflowDefinition => ({
   name: 'feature',
   description: '',
-  schemaVersion: '1.0.0',
+  schemaVersion: WORKFLOW_SCHEMA_VERSION,
   builtIn: true,
-  pipeline: { skip: [], waitForCi: false, gates: { required: STANDARD_GATES, coverageThreshold: 0.8 } },
+  pipeline: {
+    skip: [], skipSteps: [], waitForCi: false,
+    gates: { required: STANDARD_GATES, coverageThreshold: 0.8 },
+  },
   agents: DEFAULT_AGENTS,
   budgets: { perRunUsd: 8, perTicketMinutes: 90, attemptsPerTask: 4, attemptsPerRun: 12 },
   guardrails: {
@@ -50,7 +53,7 @@ export const BUILT_IN_WORKFLOWS: WorkflowDefinition[] = [
     displayName: 'Bug',
     description: 'Reproduction test first: a test that fails before the fix and passes after.',
     pipeline: {
-      skip: [], waitForCi: false,
+      skip: [], skipSteps: [], waitForCi: false,
       gates: { required: [...STANDARD_GATES, 'repro_test'], coverageThreshold: 0.8 },
     },
   }),
@@ -58,9 +61,10 @@ export const BUILT_IN_WORKFLOWS: WorkflowDefinition[] = [
   base({
     name: 'chore',
     displayName: 'Chore',
-    // Clarify still runs — skipping it would drop G1 with it, and §7.1's three
-    // gates are the invariant. What a chore skips is the *questions*: the phase
-    // records its assumptions and presents the spec for a fast confirmation.
+    // The `questions` step still runs — skipping it would drop G1 with it, and
+    // §9.1's three gates are the invariant. What a chore skips is the
+    // *questions themselves*: the step records its assumptions and presents
+    // the spec for a fast confirmation (DECISIONS D13).
     description: 'Asks no clarifying questions; records assumptions and confirms the spec.',
     hitl: { gates: ['G1', 'G2', 'G3'], maxQuestionsPerPhase: 0 },
     budgets: { perRunUsd: 4, perTicketMinutes: 45, attemptsPerTask: 3, attemptsPerRun: 8 },
@@ -71,7 +75,7 @@ export const BUILT_IN_WORKFLOWS: WorkflowDefinition[] = [
     displayName: 'Refactor',
     description: 'Behaviour-preserving: existing tests unchanged and green, no new public API.',
     pipeline: {
-      skip: [], waitForCi: false,
+      skip: [], skipSteps: [], waitForCi: false,
       gates: { required: [...STANDARD_GATES, 'behaviour_preservation'], coverageThreshold: 0.8 },
     },
     hitl: { gates: ['G1', 'G2', 'G3'], maxQuestionsPerPhase: 0 },
@@ -80,12 +84,13 @@ export const BUILT_IN_WORKFLOWS: WorkflowDefinition[] = [
   base({
     name: 'spike',
     displayName: 'Spike',
-    // Produces a document and a throwaway branch. Keeps G3 — the gate's
-    // question becomes "are these findings good?" rather than "would I merge
-    // this?" — which holds the three-gate invariant uniform (DECISIONS D11).
+    // Produces a document and a throwaway branch. Skips `build` and `ship`
+    // per §5.9, and `auto_review` because there is no diff to read — but keeps
+    // the `review` phase, where G3's question becomes "are these findings
+    // good?" rather than "would I merge this?" (DECISIONS D11).
     description: 'Investigation only. Produces a document, never ships code.',
     pipeline: {
-      skip: ['implement', 'verify', 'review', 'ship'], waitForCi: false,
+      skip: ['build', 'ship'], skipSteps: ['auto_review'], waitForCi: false,
       gates: { required: [], coverageThreshold: 0 },
     },
     agents: { ...DEFAULT_AGENTS, analyst: { model: 'opus', effort: 'max', thinking: 'adaptive' } },

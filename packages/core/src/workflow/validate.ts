@@ -1,8 +1,9 @@
 import {
-  AUTONOMY_GATES, FORBIDDEN_ROLES, MODEL_CATALOGUE,
-  type OrgPolicy, type WorkflowDefinition, type WorkflowIssue,
+  AUTONOMY_GATES, FORBIDDEN_ROLES, MODEL_CATALOGUE, PHASE_OF_STEP,
+  type OrgPolicy, type Step, type WorkflowDefinition, type WorkflowIssue,
 } from '@agentflow/protocol';
 import { PHASE_ORDER } from '../fsm/profiles.js';
+import { gateFor, gateForStep } from '../fsm/machine.js';
 
 /**
  * Workflow validation, rules W1–W8 (§21.5).
@@ -12,8 +13,20 @@ import { PHASE_ORDER } from '../fsm/profiles.js';
  * becomes a way to opt out of the controls in §14.
  */
 
-/** Phases that carry a human gate; skipping one must also drop its gate (W8). */
-const GATED_PHASES = { clarify: 'G1', plan: 'G2', human_review: 'G3' } as const;
+/**
+ * Phases a run cannot do without. Intake identifies the work; preflight is the
+ * §5.3 safety phase whose whole reason for existing is that skipping it means
+ * discovering an environmental failure at minute 25 instead of minute 1.
+ */
+const UNSKIPPABLE_PHASES = new Set<string>(['intake', 'preflight']);
+
+/**
+ * The whole step vocabulary, not just the sequenced part: `repair` and
+ * `human_review` are absent from `STEP_ORDER` because a trigger enters them,
+ * and naming one in `skipSteps` should be refused for its gate or its loop,
+ * not as though the step did not exist.
+ */
+const ALL_STEPS = new Set<string>(Object.keys(PHASE_OF_STEP));
 
 export function validateWorkflow(
   wf: WorkflowDefinition,
@@ -106,23 +119,43 @@ export function validateWorkflow(
       reject('W8', `cannot skip "${phase}": it is not a pipeline phase`, 'pipeline.skip');
       continue;
     }
-    if (phase === 'intake' || phase === 'done') {
+    if (UNSKIPPABLE_PHASES.has(phase)) {
       reject('W8', `"${phase}" cannot be skipped`, 'pipeline.skip');
     }
-    const gate = GATED_PHASES[phase as keyof typeof GATED_PHASES];
+    const gate = gateFor(phase);
     if (gate && wf.hitl.gates.includes(gate)) {
       reject('W8',
         `skips "${phase}" but still requires gate ${gate}, which is decided in that phase`,
         'pipeline.skip');
     }
   }
-  // Verification without implementation, or review without either, is incoherent.
-  const skipped = new Set(wf.pipeline.skip);
-  if (skipped.has('implement') && !skipped.has('verify')) {
-    reject('W8', 'skips "implement" but keeps "verify": there would be nothing to verify', 'pipeline.skip');
+
+  const skippedSteps = new Set<string>(wf.pipeline.skipSteps);
+  for (const step of wf.pipeline.skipSteps) {
+    if (!ALL_STEPS.has(step)) {
+      reject('W8', `cannot skip "${step}": it is not a pipeline step`, 'pipeline.skipSteps');
+      continue;
+    }
+    // Gates hang off step exits, so skipping the step silently removes the
+    // gate — which is the D13 contradiction one level down, and the exact way
+    // a configuration surface becomes a way to opt out of §9.1's three gates.
+    const stepGate = gateForStep(step);
+    if (stepGate && wf.hitl.gates.includes(stepGate)) {
+      reject('W8',
+        `skips "${step}" but still requires gate ${stepGate}, which is decided on that step's exit`,
+        'pipeline.skipSteps');
+    }
   }
-  if (skipped.has('verify') && !skipped.has('ship')) {
-    reject('W8', 'skips "verify" but still ships: nothing would machine-check the change', 'pipeline.skip');
+  // Verification without implementation, or shipping without either, is
+  // incoherent. A step is gone if it was skipped by name *or* because the
+  // phase around it was — skipping `build` takes `verify` with it.
+  const skipped = new Set<string>(wf.pipeline.skip);
+  const gone = (step: Step) => skippedSteps.has(step) || skipped.has(PHASE_OF_STEP[step]);
+  if (gone('implement') && !gone('verify')) {
+    reject('W8', 'skips "implement" but keeps "verify": there would be nothing to verify', 'pipeline.skipSteps');
+  }
+  if (gone('verify') && !skipped.has('ship')) {
+    reject('W8', 'skips "verify" but still ships: nothing would machine-check the change', 'pipeline.skipSteps');
   }
 
   return issues;

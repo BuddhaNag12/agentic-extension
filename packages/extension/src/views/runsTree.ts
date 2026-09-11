@@ -25,11 +25,10 @@ const GROUP_LABEL: Record<RunStatus, string> = {
   cancelled: 'Cancelled',
 };
 
+/** One icon per §5.1 phase — seven pills, nothing finer. */
 const PHASE_ICON: Record<string, string> = {
-  intake: 'inbox', harvest: 'search', spec: 'note', clarify: 'question',
-  plan: 'list-tree', decompose: 'symbol-structure', implement: 'edit',
-  verify: 'beaker', repair: 'tools', review: 'eye', wait_for_ci: 'cloud',
-  human_review: 'git-pull-request', ship: 'rocket', done: 'pass-filled',
+  intake: 'inbox', preflight: 'checklist', context: 'search',
+  plan: 'list-tree', build: 'tools', review: 'eye', ship: 'rocket',
 };
 
 export class RunsTreeProvider implements vscode.TreeDataProvider<Node> {
@@ -90,12 +89,17 @@ export class RunsTreeProvider implements vscode.TreeDataProvider<Node> {
 
     const { run } = node;
     const item = new vscode.TreeItem(run.ticket.key, vscode.TreeItemCollapsibleState.None);
-    item.description = `${run.phase} · ${elapsed(run)} · $${run.cost.usd.toFixed(2)}`;
+    // The phase is the pill; the step is the detail that says what is actually
+    // happening inside it, which is the difference between "build" and
+    // "build · verify" on a row a human is watching.
+    const where = run.step ? `${run.phase} · ${run.step}` : run.phase;
+    item.description = `${where} · ${elapsed(run)} · $${run.cost.usd.toFixed(2)}`;
     item.tooltip = new vscode.MarkdownString(
       [
         `**${run.ticket.key}** — ${run.ticket.summary}`,
         '',
         `- Phase: \`${run.phase}\``,
+        ...(run.step ? [`- Step: \`${run.step}\``] : []),
         `- Status: \`${run.status}\``,
         `- Branch: \`${run.branch}\``,
         `- Profile: \`${run.ticket.profile}\``,

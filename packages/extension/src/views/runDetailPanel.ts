@@ -132,16 +132,18 @@ export class RunDetailPanel {
   <div class="pipeline" id="pipeline"></div>
   <table><tbody id="rows"></tbody></table>
 <script nonce="${nonce}">
-const PHASES = ['intake','harvest','spec','clarify','plan','decompose','implement','verify','repair','review','human_review','ship','done'];
+const PHASES = ['intake','preflight','context','plan','build','review','ship'];
 const rows = document.getElementById('rows');
 const visited = new Set();
 let current = 'intake';
+let currentStep = null;
 let t0 = null;
 
 function describe(e) {
   switch (e.t) {
     case 'run_created': return ['run', 'created on <code>' + e.branch + '</code>'];
     case 'phase_entered': return ['phase', '→ <b>' + e.phase + '</b>'];
+    case 'step_entered': return ['step', '· ' + e.step];
     case 'status_changed': return ['status', e.status + (e.reason ? ' — ' + e.reason : '')];
     case 'artifact_written': return ['artifact', e.kind + '.v' + e.version];
     case 'question_asked': return ['question', '<span class="warn">' + e.question.question + '</span>'];
@@ -165,7 +167,8 @@ function append(events) {
   const frag = document.createDocumentFragment();
   for (const e of events) {
     if (t0 === null) t0 = e.at;
-    if (e.t === 'phase_entered') { visited.add(e.phase); current = e.phase; }
+    if (e.t === 'phase_entered') { visited.add(e.phase); current = e.phase; currentStep = null; }
+    if (e.t === 'step_entered') { currentStep = e.step; }
     const [kind, detail] = describe(e);
     const tr = document.createElement('tr');
     const secs = ((e.at - t0) / 1000).toFixed(1);
@@ -185,7 +188,9 @@ function drawPipeline() {
   for (const p of PHASES) {
     const d = document.createElement('div');
     d.className = 'phase' + (p === current ? ' current' : visited.has(p) ? ' visited' : '');
-    d.textContent = p;
+    // The step rides on the current pill rather than getting one of its own:
+    // seven pills is the point, and a step is what is happening inside one.
+    d.textContent = p === current && currentStep ? p + ' · ' + currentStep : p;
     el.appendChild(d);
   }
 }
@@ -194,13 +199,14 @@ function setRun(run) {
   if (!run) return;
   document.getElementById('title').textContent = run.ticket.key + ' — ' + run.ticket.summary;
   document.getElementById('sub').textContent =
-    run.status + ' · ' + run.phase + ' · $' + run.cost.usd.toFixed(2)
+    run.status + ' · ' + run.phase + (run.step ? ' · ' + run.step : '')
+    + ' · $' + run.cost.usd.toFixed(2)
     + ' · ' + run.ticket.profile + ' · ' + run.branch;
 }
 
 window.addEventListener('message', (ev) => {
   const msg = ev.data;
-  if (msg.type === 'hydrate') { rows.innerHTML = ''; t0 = null; visited.clear(); append(msg.events); setRun(msg.run); }
+  if (msg.type === 'hydrate') { rows.innerHTML = ''; t0 = null; visited.clear(); currentStep = null; append(msg.events); setRun(msg.run); }
   else if (msg.type === 'append') append(msg.events);
   else if (msg.type === 'run') setRun(msg.run);
 });

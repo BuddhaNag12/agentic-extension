@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pipelineOptionsFor, type PipelineOptions } from './profiles.js';
+import { pipelineOptionsFor, plannedSteps, type PipelineOptions } from './profiles.js';
 import { PLAN_VALIDATION_LIMIT, RE_SPEC_LIMIT, initialState, transition, type MachineState } from './machine.js';
 import type { Trigger } from './triggers.js';
 import { BUILT_IN_WORKFLOWS } from '../workflow/builtins.js';
@@ -9,15 +9,20 @@ const optionsFor = (name: string): PipelineOptions =>
 
 const feature = optionsFor('feature');
 const spike = optionsFor('spike');
-/** A pipeline that genuinely omits clarify, to exercise the skip path. */
-const noClarify: PipelineOptions = { skip: ['clarify'], waitForCi: false };
 
-/** Drive the machine, asserting every step is legal. */
+/**
+ * A pipeline that genuinely omits the `questions` step, to exercise the skip
+ * path. No *workflow* may express this while still requiring G1 — W8 rejects
+ * it — but the machine has to handle the shape.
+ */
+const noQuestions: PipelineOptions = { skip: [], skipSteps: ['questions'], waitForCi: false };
+
+/** Drive the machine, asserting every transition is legal. */
 function drive(state: MachineState, triggers: Trigger[], opts = feature): MachineState {
   let s = state;
   for (const t of triggers) {
     const r = transition(s, t, opts);
-    if (!r.ok) throw new Error(`illegal ${t.kind} in ${s.phase}: ${r.reason}`);
+    if (!r.ok) throw new Error(`illegal ${t.kind} at ${s.phase}/${s.step}: ${r.reason}`);
     s = r.state;
   }
   return s;
@@ -26,108 +31,201 @@ function drive(state: MachineState, triggers: Trigger[], opts = feature): Machin
 const approve = (gate: 'G1' | 'G2' | 'G3'): Trigger =>
   ({ kind: 'human_decided', gate, decision: 'approve' });
 
-describe('happy path', () => {
+const advance: Trigger = { kind: 'advance' };
+const advances = (n: number): Trigger[] => Array.from({ length: n }, () => advance);
+
+/**
+ * Walk to the given step, so a test never hard-codes a trigger count. Gates
+ * along the way are approved and verify is reported green — a test that wants
+ * to examine a gate or a red gate drives there itself.
+ */
+function driveTo(step: string, opts = feature): MachineState {
+  let s = initialState();
+  for (let i = 0; i < 60; i += 1) {
+    if (s.step === step) return s;
+    if (s.status === 'waiting_human') {
+      const gate = (['G1', 'G2', 'G3'] as const).find((g) => !s.gatesPassed.includes(g));
+      if (!gate) throw new Error(`parked at ${s.phase}/${s.step} with every gate passed`);
+      s = drive(s, [approve(gate)], opts);
+      continue;
+    }
+    s = drive(s, [s.step === 'verify' ? { kind: 'gate_passed', gate: 'unit' } : advance], opts);
+  }
+  throw new Error(`never reached ${step}`);
+}
+
+describe('the seven phases (§5.1)', () => {
   it('walks a feature ticket to succeeded through exactly three gates', () => {
     const s = drive(initialState(), [
-      { kind: 'advance' }, // intake  → harvest
-      { kind: 'advance' }, // harvest → spec
-      { kind: 'advance' }, // spec    → clarify
-      { kind: 'advance' }, // clarify work done → parks for G1
-      approve('G1'),
-      { kind: 'advance' }, // plan work done → parks for G2
-      approve('G2'),
-      { kind: 'advance' }, // decompose → implement
-      { kind: 'advance' }, // implement → verify
+      ...advances(9),      // classify → … → questions
+      advance,             // questions done → parks for G1
+      approve('G1'),       // → draft_plan
+      advance,             // → validate_plan
+      advance,             // → parks for G2
+      approve('G2'),       // → decompose
+      advance,             // → implement
+      advance,             // → verify
       { kind: 'gate_passed', gate: 'unit' },
       { kind: 'review_findings', blocking: 0 },
-      { kind: 'advance' }, // human_review assembled → parks for G3
-      approve('G3'),
-      { kind: 'advance' }, // ship → done
+      advance,             // triage_findings done → parks for G3
+      approve('G3'),       // → ship
+      advance,             // ship prepared → done
     ]);
-    expect(s.phase).toBe('done');
+    expect(s.phase).toBe('ship');
     expect(s.status).toBe('succeeded');
     expect(s.gatesPassed).toEqual(['G1', 'G2', 'G3']);
   });
 
-  it('parks at each gate rather than advancing on its own', () => {
-    const atClarify = drive(initialState(), [
-      { kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' },
-    ]);
-    expect(atClarify.phase).toBe('clarify');
-    expect(atClarify.status).toBe('waiting_human');
+  it('visits every phase in §5.1 order and nothing else', () => {
+    const visited: string[] = [];
+    let s = initialState();
+    const script: Trigger[] = [
+      ...advances(10), approve('G1'),
+      advance, advance, approve('G2'),
+      advance, advance,
+      { kind: 'gate_passed', gate: 'unit' },
+      { kind: 'review_findings', blocking: 0 },
+      advance, approve('G3'), advance,
+    ];
+    for (const t of script) {
+      s = drive(s, [t]);
+      if (visited.at(-1) !== s.phase) visited.push(s.phase);
+    }
+    expect(visited).toEqual(['intake', 'preflight', 'context', 'plan', 'build', 'review', 'ship']);
   });
 
-  it('emits request_approval when a gated phase finishes its work', () => {
-    const atClarify = drive(initialState(), [{ kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' }]);
-    const r = transition(atClarify, { kind: 'advance' }, feature);
+  it('there is no terminal phase — a finished run sits at ship, succeeded', () => {
+    const s = drive(initialState(), [
+      ...advances(10), approve('G1'),
+      advance, advance, approve('G2'),
+      advance, advance,
+      { kind: 'gate_passed', gate: 'unit' },
+      { kind: 'review_findings', blocking: 0 },
+      advance, approve('G3'), advance,
+    ]);
+    expect(s.phase).toBe('ship');
+    expect(s.status).toBe('succeeded');
+  });
+
+  it('parks at each gate rather than advancing on its own', () => {
+    const atG1 = drive(driveTo('questions'), [advance]);
+    expect(atG1.phase).toBe('context');
+    expect(atG1.status).toBe('waiting_human');
+  });
+
+  it('emits request_approval when a gated step finishes its work', () => {
+    const r = transition(driveTo('questions'), advance, feature);
     expect(r.ok && r.effects).toContainEqual({ kind: 'request_approval', gate: 'G1' });
+  });
+
+  it('parks G3 in the human_review step, which is what the run is doing', () => {
+    const atTriage = drive(driveTo('verify'), [
+      { kind: 'gate_passed', gate: 'unit' },
+      { kind: 'review_findings', blocking: 0 },
+    ]);
+    expect(atTriage.step).toBe('triage_findings');
+    const parked = drive(atTriage, [advance]);
+    expect(parked.step).toBe('human_review');
+    expect(parked.status).toBe('waiting_human');
   });
 });
 
-describe('profiles (§5.10)', () => {
-  it('a pipeline that omits clarify goes straight to plan', () => {
-    const s = drive(initialState(), [{ kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' }], noClarify);
+describe('steps sit inside phases (§3.1)', () => {
+  it('gates G2 before decompose, so packets come from an approved plan', () => {
+    const atG2 = drive(driveTo('validate_plan'), [advance]);
+    expect(atG2.status).toBe('waiting_human');
+    expect(atG2.step).toBe('validate_plan');
+
+    const approved = drive(atG2, [approve('G2')]);
+    expect(approved.step).toBe('decompose');
+    expect(approved.phase).toBe('plan');
+  });
+
+  it('a step advance stays inside the phase', () => {
+    const r = transition(driveTo('harvest'), advance, feature);
+    expect(r.ok && r.state.phase).toBe('context');
+    expect(r.ok && r.state.step).toBe('draft_spec');
+    expect(r.ok && r.effects).toEqual([{ kind: 'run_step', step: 'draft_spec' }]);
+  });
+
+  it('the last step of a phase enters the next phase at its first step', () => {
+    const r = transition(driveTo('baseline_gates'), advance, feature);
+    expect(r.ok && r.effects).toEqual([
+      { kind: 'run_phase', phase: 'context', step: 'harvest' },
+    ]);
+  });
+
+  it('ship stops before push unless autoPush is on (§5.8)', () => {
+    expect(plannedSteps(feature)).toContain('rebase');
+    expect(plannedSteps(feature)).not.toContain('push');
+    expect(plannedSteps({ ...feature, autoPush: true })).toContain('push');
+  });
+});
+
+describe('profiles (§5.9)', () => {
+  it('a pipeline that omits the questions step goes straight to plan', () => {
+    const s = drive(driveTo('draft_spec', noQuestions), [advance], noQuestions);
     expect(s.phase).toBe('plan');
+    expect(s.step).toBe('draft_plan');
   });
 
-  it('forceClarify pulls the phase back in when a blocking question appears', () => {
-    const opts: PipelineOptions = { ...noClarify, forceClarify: true };
-    const s = drive(initialState(), [{ kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' }], opts);
-    expect(s.phase).toBe('clarify');
+  it('forceQuestions pulls the step back in when a blocking question appears', () => {
+    const opts: PipelineOptions = { ...noQuestions, forceQuestions: true };
+    const s = drive(driveTo('draft_spec', opts), [advance], opts);
+    expect(s.step).toBe('questions');
   });
 
-  it('chore keeps clarify and G1 — it skips the questions, not the gate', () => {
+  it('chore keeps the questions step and G1 — it skips the questions, not the gate', () => {
     const chore = BUILT_IN_WORKFLOWS.find((w) => w.name === 'chore')!;
-    expect(chore.pipeline.skip).not.toContain('clarify');
+    expect(chore.pipeline.skipSteps).not.toContain('questions');
     expect(chore.hitl.gates).toEqual(['G1', 'G2', 'G3']);
     expect(chore.hitl.maxQuestionsPerPhase).toBe(0);
   });
 
-  it('spike reaches done without ever entering implement, verify or ship', () => {
+  it('spike succeeds without ever entering build or ship, and keeps all three gates', () => {
     const visited: string[] = [];
     let s = initialState();
-    const steps: Trigger[] = [
-      { kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' },
-      { kind: 'advance' }, approve('G1'),
-      { kind: 'advance' }, approve('G2'),
-      { kind: 'advance' }, { kind: 'advance' }, approve('G3'),
+    const script: Trigger[] = [
+      ...advances(10), approve('G1'),
+      advance, advance, approve('G2'),
+      advance, advance, approve('G3'),
     ];
-    for (const step of steps) {
-      s = drive(s, [step], spike);
+    for (const t of script) {
+      s = drive(s, [t], spike);
       visited.push(s.phase);
     }
-    expect(s.phase).toBe('done');
     expect(s.status).toBe('succeeded');
-    expect(visited).not.toContain('implement');
-    expect(visited).not.toContain('verify');
+    expect(visited).not.toContain('build');
     expect(visited).not.toContain('ship');
-    // A spike still gets all three gates: its deliverable is the document.
+    // A spike still gets all three gates: its deliverable is the document, and
+    // G3's question becomes "are these findings good?" (DECISIONS D11).
     expect(s.gatesPassed).toEqual(['G1', 'G2', 'G3']);
+  });
+
+  it('spike skips auto_review but keeps the review phase that carries G3', () => {
+    expect(plannedSteps(spike)).not.toContain('auto_review');
+    expect(plannedSteps(spike)).toContain('triage_findings');
   });
 });
 
-describe('the invariant: no phase advances on assertion (§1.4)', () => {
+describe('the invariant: nothing advances on assertion (§1.4)', () => {
   it('rejects a gate decision for a gate that is not pending', () => {
-    const r = transition(initialState(), approve('G1'), feature);
-    expect(r.ok).toBe(false);
+    expect(transition(initialState(), approve('G1'), feature).ok).toBe(false);
   });
 
   it('rejects gate_passed outside verify', () => {
-    const r = transition(initialState(), { kind: 'gate_passed', gate: 'unit' }, feature);
-    expect(r.ok).toBe(false);
+    expect(transition(initialState(), { kind: 'gate_passed', gate: 'unit' }, feature).ok).toBe(false);
+    expect(transition(driveTo('harvest'), { kind: 'gate_passed', gate: 'unit' }, feature).ok).toBe(false);
   });
 
   it('rejects a decision for the wrong gate at a pending gate', () => {
-    const atClarify = drive(initialState(), [
-      { kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' },
-    ]);
-    const r = transition(atClarify, approve('G2'), feature);
-    expect(r.ok).toBe(false);
+    const atG1 = drive(driveTo('questions'), [advance]);
+    expect(transition(atG1, approve('G2'), feature).ok).toBe(false);
   });
 
   it('refuses every trigger once terminal', () => {
     const cancelled = drive(initialState(), [{ kind: 'cancel' }]);
-    for (const t of [{ kind: 'advance' } as const, { kind: 'resume' } as const]) {
+    for (const t of [advance, { kind: 'resume' } as const]) {
       expect(transition(cancelled, t, feature).ok).toBe(false);
     }
   });
@@ -135,26 +233,20 @@ describe('the invariant: no phase advances on assertion (§1.4)', () => {
 
 describe('loop-backs invalidate their gate', () => {
   it('re-gates G1 after a scope change forces a re-spec', () => {
-    const atClarify = drive(initialState(), [
-      { kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' },
-      approve('G1'),
-    ]);
-    expect(atClarify.gatesPassed).toContain('G1');
+    const approved = drive(driveTo('questions'), [advance, approve('G1')]);
+    expect(approved.gatesPassed).toContain('G1');
 
-    // Approving G1 moved us to plan; walk a fresh run back through clarify.
-    const looped = drive(initialState(), [
-      { kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' },
-      { kind: 'scope_changed' },
-    ]);
-    expect(looped.phase).toBe('spec');
+    const looped = drive(driveTo('questions'), [{ kind: 'scope_changed' }]);
+    expect(looped.phase).toBe('context');
+    expect(looped.step).toBe('draft_spec');
     expect(looped.gatesPassed).not.toContain('G1');
     expect(looped.reSpecCount).toBe(1);
   });
 
   it('escalates instead of looping forever on re-spec', () => {
-    let s = drive(initialState(), [{ kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' }]);
+    let s = driveTo('questions');
     for (let i = 0; i < RE_SPEC_LIMIT; i += 1) {
-      s = drive(s, [{ kind: 'scope_changed' }, { kind: 'advance' }]);
+      s = drive(s, [{ kind: 'scope_changed' }, advance]);
     }
     expect(s.reSpecCount).toBe(RE_SPEC_LIMIT);
     const r = transition(s, { kind: 'scope_changed' }, feature);
@@ -163,30 +255,25 @@ describe('loop-backs invalidate their gate', () => {
   });
 
   it('re-gates G3 when the human requests changes', () => {
-    const atG3 = drive(initialState(), [
-      { kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' },
-      approve('G1'), { kind: 'advance' }, approve('G2'),
-      { kind: 'advance' }, { kind: 'advance' },
+    const atG3 = drive(driveTo('verify'), [
       { kind: 'gate_passed', gate: 'unit' },
       { kind: 'review_findings', blocking: 0 },
-      { kind: 'advance' },
+      advance,
     ]);
     const revised = drive(atG3, [{ kind: 'human_decided', gate: 'G3', decision: 'revise' }]);
-    expect(revised.phase).toBe('repair');
+    expect(revised.phase).toBe('build');
+    expect(revised.step).toBe('repair');
     expect(revised.gatesPassed).not.toContain('G3');
   });
 });
 
-describe('plan validation (§5 Stage 4)', () => {
+describe('plan validation (§5.5)', () => {
   it('retries in place, then escalates with the failing rule', () => {
-    let s = drive(initialState(), [
-      { kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' },
-      approve('G1'),
-    ]);
-    expect(s.phase).toBe('plan');
+    let s = drive(driveTo('questions'), [advance, approve('G1')]);
+    expect(s.step).toBe('draft_plan');
     for (let i = 1; i < PLAN_VALIDATION_LIMIT; i += 1) {
       s = drive(s, [{ kind: 'validation_failed', rule: 'RULE_3' }]);
-      expect(s.phase).toBe('plan');
+      expect(s.step).toBe('draft_plan');
       expect(s.status).not.toBe('waiting_human');
     }
     const r = transition(s, { kind: 'validation_failed', rule: 'RULE_3' }, feature);
@@ -195,22 +282,26 @@ describe('plan validation (§5 Stage 4)', () => {
   });
 });
 
-describe('repair loop (§9)', () => {
-  const atVerify = () => drive(initialState(), [
-    { kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' }, { kind: 'advance' },
-    approve('G1'), { kind: 'advance' }, approve('G2'),
-    { kind: 'advance' }, { kind: 'advance' },
-  ]);
+describe('repair loop (§11)', () => {
+  const atVerify = () => driveTo('verify');
 
-  it('sends a failed gate to repair', () => {
+  it('sends a failed gate to the repair step, still inside build', () => {
     const s = drive(atVerify(), [{ kind: 'gate_failed', gate: 'unit' }]);
-    expect(s.phase).toBe('repair');
+    expect(s.phase).toBe('build');
+    expect(s.step).toBe('repair');
+  });
+
+  it('hands a repaired tree back to verify, never onward to review', () => {
+    const repaired = drive(atVerify(), [{ kind: 'gate_failed', gate: 'unit' }, advance]);
+    expect(repaired.step).toBe('verify');
+    expect(repaired.phase).toBe('build');
   });
 
   it('thrash rewinds and replans rather than burning another attempt', () => {
     const s = drive(atVerify(), [{ kind: 'gate_failed', gate: 'unit' }]);
     const r = transition(s, { kind: 'thrash_detected', signature: 'abc' }, feature);
     expect(r.ok && r.state.phase).toBe('plan');
+    expect(r.ok && r.state.step).toBe('draft_plan');
     expect(r.ok && r.effects).toEqual([{ kind: 'rewind_to_task_checkpoint' }, { kind: 'replan' }]);
     // The plan must be re-approved: it is a different plan now.
     expect(r.ok && r.state.gatesPassed).not.toContain('G2');
@@ -224,35 +315,34 @@ describe('repair loop (§9)', () => {
   });
 
   it('resets the per-task repair budget once gates go green', () => {
-    const s = drive(atVerify(), [{ kind: 'gate_failed', gate: 'unit' }]);
-    const withHistory = { ...s, phase: 'verify' as const, repairAttempts: 3, signatures: ['a', 'b'] };
+    const withHistory = { ...atVerify(), repairAttempts: 3, signatures: ['a', 'b'] };
     const r = transition(withHistory, { kind: 'gate_passed', gate: 'unit' }, feature);
     expect(r.ok && r.state.repairAttempts).toBe(0);
     expect(r.ok && r.state.signatures).toEqual([]);
   });
 
-  it('sends blocking review findings back to repair', () => {
-    const s = drive(atVerify(), [
-      { kind: 'gate_passed', gate: 'unit' },
-    ]);
+  it('sends blocking review findings back to build, and re-gates G3', () => {
+    const s = drive(atVerify(), [{ kind: 'gate_passed', gate: 'unit' }]);
     expect(s.phase).toBe('review');
     const r = transition(s, { kind: 'review_findings', blocking: 2 }, feature);
-    expect(r.ok && r.state.phase).toBe('repair');
+    expect(r.ok && r.state.phase).toBe('build');
+    expect(r.ok && r.state.step).toBe('repair');
+    expect(r.ok && r.state.gatesPassed).not.toContain('G3');
   });
 });
 
 describe('blocked and resume', () => {
-  it('resumes a blocked run back into its phase', () => {
-    const s = drive(initialState(), [{ kind: 'advance' }, { kind: 'blocked', reason: 'auth expired' }]);
+  it('resumes a blocked run back into its step', () => {
+    const s = drive(initialState(), [advance, { kind: 'blocked', reason: 'auth expired' }]);
     expect(s.status).toBe('blocked');
     const r = transition(s, { kind: 'resume' }, feature);
     expect(r.ok && r.state.status).toBe('running');
     expect(r.ok && r.state.blockedReason).toBeUndefined();
-    expect(r.ok && r.effects).toEqual([{ kind: 'run_phase', phase: 'harvest' }]);
+    expect(r.ok && r.effects).toEqual([{ kind: 'run_step', step: 'map_repo' }]);
   });
 
   it('refuses to resume a run that is merely running', () => {
-    const s = drive(initialState(), [{ kind: 'advance' }]);
+    const s = drive(initialState(), [advance]);
     expect(transition(s, { kind: 'resume' }, feature).ok).toBe(false);
   });
 });

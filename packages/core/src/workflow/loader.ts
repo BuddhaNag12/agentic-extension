@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import {
-  DEFAULT_POLICY, OrgPolicy, WorkflowDefinition,
+  DEFAULT_POLICY, OrgPolicy, WORKFLOW_SCHEMA_VERSION, WorkflowDefinition,
   type AgentRole, type ResolvedWorkflow, type WorkflowIssue,
 } from '@agentflow/protocol';
 import { BUILT_IN_WORKFLOWS } from './builtins.js';
@@ -38,17 +38,36 @@ export function loadPolicy(agentflowDir: string): OrgPolicy {
   return parsed.success ? parsed.data : DEFAULT_POLICY;
 }
 
-/** Write the built-ins to disk if they are not already there. */
+/**
+ * Write the built-ins to disk if they are not already there — and rewrite one
+ * that predates the current schema.
+ *
+ * A built-in left at an older `schemaVersion` would fail W8 against a phase
+ * vocabulary it was written before, which reads to the user as "your workflows
+ * are broken" rather than "these are ours and they moved". Only files that
+ * still declare `builtIn: true` are rewritten: a fork the user renamed is
+ * theirs, and is never touched.
+ */
 export function seedBuiltIns(workflowsDir: string): string[] {
   mkdirSync(workflowsDir, { recursive: true });
   const written: string[] = [];
   for (const wf of BUILT_IN_WORKFLOWS) {
     const path = join(workflowsDir, `${wf.name}.yaml`);
-    if (existsSync(path)) continue;
+    if (existsSync(path) && !isStaleBuiltIn(path)) continue;
     writeFileSync(path, stringifyYaml(wf), 'utf8');
     written.push(path);
   }
   return written;
+}
+
+function isStaleBuiltIn(path: string): boolean {
+  try {
+    const raw = parseYaml(readFileSync(path, 'utf8')) as Record<string, unknown> | null;
+    return raw?.['builtIn'] === true && raw['schemaVersion'] !== WORKFLOW_SCHEMA_VERSION;
+  } catch {
+    // An unparseable file is reported by the load path, not replaced here.
+    return false;
+  }
 }
 
 export function loadWorkflows(agentflowDir: string, seed = true): LoadResult {

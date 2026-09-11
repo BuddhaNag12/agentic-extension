@@ -76,8 +76,13 @@ export class Orchestrator {
   }
 
   async listen(): Promise<string> {
-    const restored = this.store.restore();
+    const { restored, migrated, dropped } = this.store.restore();
     if (restored > 0) log(`restored ${restored} run(s) by replay`);
+    // A pre-2.0.0 log is brought forward on read, never rewritten. Saying so
+    // is the point: an event silently discarded by a narrowed enum is
+    // indistinguishable from one that was never written.
+    if (migrated > 0) log(`migrated ${migrated} event(s) from an older schema`);
+    if (dropped > 0) log(`dropped ${dropped} event(s) with no equivalent in schema 2.0.0`);
 
     // A stale socket from a killed daemon would make bind fail with EADDRINUSE.
     if (process.platform !== 'win32' && existsSync(this.paths.ipcEndpoint)) {
@@ -295,7 +300,11 @@ export class Orchestrator {
           this.store.emitEvent(handle, { t: 'checkpoint', label: 'rewind to task checkpoint' });
           break;
         case 'run_phase':
+          // A new phase gets a fresh question budget; a new step inside one
+          // does not, or the §9.2 cap would reset three times per phase.
           this.hitl.resetPhase(runId, effect.phase);
+          break;
+        case 'run_step':
           break;
         case 'finalize': {
           this.driver.cancel(runId);

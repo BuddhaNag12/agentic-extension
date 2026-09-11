@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
-  EventLog, initialState, isTerminal, loadWorkflows, pipelineOptionsFor, replay, transition,
+  DEFAULT_PIPELINE_OPTIONS, EventLog, initialState, isTerminal, loadWorkflows,
+  pipelineOptionsFor, replay, transition,
   type Effect, type LoadResult, type MachineState, type PipelineOptions,
   type ReplayState, type Trigger,
 } from '@agentflow/core';
@@ -63,7 +64,7 @@ export class RunStore extends EventEmitter {
    */
   private optionsFor(name: string): PipelineOptions {
     const entry = this.loaded.workflows.get(name) ?? this.loaded.workflows.get(DEFAULT_WORKFLOW);
-    return entry ? pipelineOptionsFor(entry.resolved) : { skip: [], waitForCi: false };
+    return entry ? pipelineOptionsFor(entry.resolved) : DEFAULT_PIPELINE_OPTIONS;
   }
 
   list(): Run[] {
@@ -115,6 +116,7 @@ export class RunStore extends EventEmitter {
       branch,
       workflow,
       phase: 'intake',
+      step: 'classify',
       status: 'queued',
       attemptBudget: { perTask: 4, perRun: 12, maxUsd: 8, maxWallClockMin: 90 },
       cost: { usd: 0, inputTokens: 0, outputTokens: 0 },
@@ -137,6 +139,7 @@ export class RunStore extends EventEmitter {
 
     this.emitEvent(handle, { t: 'run_created', runId: id, ticketKey: input.ticketKey, branch });
     this.emitEvent(handle, { t: 'phase_entered', phase: 'intake' });
+    this.emitEvent(handle, { t: 'step_entered', step: 'classify' });
     return handle;
   }
 
@@ -147,6 +150,7 @@ export class RunStore extends EventEmitter {
     handle.run = {
       ...handle.run,
       phase: handle.derived.phase,
+      ...(handle.derived.step ? { step: handle.derived.step } : {}),
       status: handle.derived.status,
       cost: handle.derived.cost,
       updatedAt: stamped.at,
@@ -176,8 +180,13 @@ export class RunStore extends EventEmitter {
     const before = handle.machine;
     handle.machine = result.state;
 
+    // Phase before step: a reader folding the log sees the pill move, then
+    // what is happening inside it, in that order.
     if (result.state.phase !== before.phase) {
       this.emitEvent(handle, { t: 'phase_entered', phase: result.state.phase });
+    }
+    if (result.state.step && result.state.step !== before.step) {
+      this.emitEvent(handle, { t: 'step_entered', step: result.state.step });
     }
     if (result.state.status !== before.status) {
       this.emitEvent(handle, {
@@ -203,14 +212,16 @@ export class RunStore extends EventEmitter {
    * Rebuild every run by replaying its log (§13.2). Deliberately does not read
    * `state.json`: if replay and the snapshot ever disagree, replay is right.
    */
-  restore(): number {
-    if (!existsSync(this.paths.runsDir)) return 0;
-    let restored = 0;
+  restore(): { restored: number; migrated: number; dropped: number } {
+    const summary = { restored: 0, migrated: 0, dropped: 0 };
+    if (!existsSync(this.paths.runsDir)) return summary;
     for (const id of readdirSync(this.paths.runsDir)) {
       const path = runEventLogPath(this.paths, id);
       if (!existsSync(path)) continue;
       const log = EventLog.open(path);
       const events = log.readAll();
+      summary.migrated += log.migrations.migrated;
+      summary.dropped += log.migrations.dropped;
       if (events.length === 0) continue;
 
       const derived = replay(events);
@@ -225,6 +236,7 @@ export class RunStore extends EventEmitter {
         branch: created.branch,
         workflow: DEFAULT_WORKFLOW,
         phase: derived.phase,
+        ...(derived.step ? { step: derived.step } : {}),
         status: derived.status,
         attemptBudget: { perTask: 4, perRun: 12, maxUsd: 8, maxWallClockMin: 90 },
         cost: derived.cost,
@@ -238,13 +250,18 @@ export class RunStore extends EventEmitter {
       this.runs.set(id, {
         id,
         run,
-        machine: { ...initialState(), phase: derived.phase, status: derived.status },
+        machine: {
+          ...initialState(),
+          phase: derived.phase,
+          ...(derived.step ? { step: derived.step } : {}),
+          status: derived.status,
+        },
         log,
         options: this.optionsFor(DEFAULT_WORKFLOW),
         derived,
       });
-      restored += 1;
+      summary.restored += 1;
     }
-    return restored;
+    return summary;
   }
 }

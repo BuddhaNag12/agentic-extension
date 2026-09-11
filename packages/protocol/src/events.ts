@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import {
   Answer, ApprovalDecision, ArtifactKind, GateId, GateReport, HumanGate,
-  Phase, Question, RunId, RunStatus, TaskStatus,
+  Phase, Question, RunId, RunStatus, Step, TaskStatus,
 } from './domain.js';
 
 /**
@@ -15,6 +15,9 @@ const base = { seq: z.number().int().nonnegative(), at: z.number() };
 export const RunEvent = z.discriminatedUnion('t', [
   z.object({ ...base, t: z.literal('run_created'), runId: RunId, ticketKey: z.string(), branch: z.string() }),
   z.object({ ...base, t: z.literal('phase_entered'), phase: Phase }),
+  // A step implies its phase via PHASE_OF_STEP, which is what lets a
+  // pre-2.0.0 phase name migrate into a step without losing the timeline.
+  z.object({ ...base, t: z.literal('step_entered'), step: Step }),
   z.object({ ...base, t: z.literal('status_changed'), status: RunStatus, reason: z.string().optional() }),
   z.object({ ...base, t: z.literal('artifact_written'), kind: ArtifactKind, version: z.number().int(), path: z.string() }),
   z.object({ ...base, t: z.literal('question_asked'), question: Question }),

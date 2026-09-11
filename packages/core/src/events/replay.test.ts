@@ -17,24 +17,24 @@ describe('EventLog', () => {
   it('stamps monotonically increasing sequence numbers', () => {
     const log = EventLog.open(logPath());
     const a = log.append({ t: 'phase_entered', phase: 'intake' });
-    const b = log.append({ t: 'phase_entered', phase: 'harvest' });
+    const b = log.append({ t: 'phase_entered', phase: 'context' });
     expect([a.seq, b.seq]).toEqual([0, 1]);
   });
 
   it('recovers the next sequence number after a restart', () => {
     const first = EventLog.open(logPath());
     first.append({ t: 'phase_entered', phase: 'intake' });
-    first.append({ t: 'phase_entered', phase: 'harvest' });
+    first.append({ t: 'phase_entered', phase: 'context' });
 
     const reopened = EventLog.open(logPath());
     expect(reopened.nextSeq).toBe(2);
-    expect(reopened.append({ t: 'phase_entered', phase: 'spec' }).seq).toBe(2);
+    expect(reopened.append({ t: 'phase_entered', phase: 'plan' }).seq).toBe(2);
   });
 
   it('tolerates a truncated final line from a killed process', () => {
     const log = EventLog.open(logPath());
     log.append({ t: 'phase_entered', phase: 'intake' });
-    appendFileSync(logPath(), '{"t":"phase_entered","phase":"har');
+    appendFileSync(logPath(), '{"t":"phase_entered","phase":"con');
 
     const reopened = EventLog.open(logPath());
     expect(reopened.readAll()).toHaveLength(1);
@@ -61,7 +61,8 @@ describe('replay', () => {
   it('derives phase, cost and changed files from the log alone', () => {
     const log = EventLog.open(logPath());
     log.append({ t: 'run_created', runId: '11111111-1111-4111-8111-111111111111', ticketKey: 'PAY-1', branch: 'agentflow/PAY-1' });
-    log.append({ t: 'phase_entered', phase: 'implement' });
+    log.append({ t: 'phase_entered', phase: 'build' });
+    log.append({ t: 'step_entered', step: 'implement' });
     log.append({ t: 'status_changed', status: 'running' });
     log.append({ t: 'file_changed', path: 'src/a.ts', op: 'create', hunks: 2 });
     log.append({ t: 'file_changed', path: 'src/a.ts', op: 'modify', hunks: 1 });
@@ -70,7 +71,8 @@ describe('replay', () => {
 
     const s = replay(log.readAll());
     expect(s.ticketKey).toBe('PAY-1');
-    expect(s.phase).toBe('implement');
+    expect(s.phase).toBe('build');
+    expect(s.step).toBe('implement');
     expect(s.status).toBe('running');
     expect(s.cost).toEqual({ usd: 0.75, inputTokens: 150, outputTokens: 30 });
     // Created-then-modified still reads as created against the baseline.
@@ -82,7 +84,7 @@ describe('replay', () => {
     const question = {
       id: 'Q1', question: 'Which flag?', whyItMatters: 'scope',
       alreadyChecked: ['grep flags'], allowFreeText: true, blocking: true,
-      confidenceWithoutAnswer: 0.3, phase: 'clarify' as const,
+      confidenceWithoutAnswer: 0.3, phase: 'context' as const,
     };
     log.append({ t: 'question_asked', question });
     log.append({ t: 'approval_requested', gate: 'G1', approvalId: 'A1', artifactKind: 'spec', artifactVersion: 1 });
@@ -100,8 +102,11 @@ describe('replay', () => {
 
 describe('property: a snapshot is only a cache (§3.3)', () => {
   const anyEvent = fc.oneof(
-    fc.constantFrom('intake', 'harvest', 'spec', 'implement', 'verify', 'review').map(
+    fc.constantFrom('intake', 'preflight', 'context', 'plan', 'build', 'review', 'ship').map(
       (phase) => ({ t: 'phase_entered', phase }) as NewRunEvent,
+    ),
+    fc.constantFrom('harvest', 'draft_spec', 'implement', 'verify', 'repair', 'rebase').map(
+      (step) => ({ t: 'step_entered', step }) as NewRunEvent,
     ),
     fc.constantFrom('queued', 'running', 'waiting_human', 'blocked').map(
       (status) => ({ t: 'status_changed', status }) as NewRunEvent,

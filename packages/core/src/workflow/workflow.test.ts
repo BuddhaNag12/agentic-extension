@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { stringify as toYaml } from 'yaml';
-import { DEFAULT_POLICY, OrgPolicy, WorkflowDefinition, type OrgPolicy as Policy } from '@agentflow/protocol';
+import { DEFAULT_POLICY, OrgPolicy, PHASE_OF_STEP, WorkflowDefinition, type OrgPolicy as Policy } from '@agentflow/protocol';
+import { STEP_ORDER } from '../fsm/profiles.js';
 import { BUILT_IN_WORKFLOWS } from './builtins.js';
 import { loadWorkflows, seedBuiltIns } from './loader.js';
 import { validateWorkflow } from './validate.js';
@@ -145,15 +146,33 @@ describe('a workflow may only be stricter than policy (W5–W7)', () => {
 describe('W8 — the remaining pipeline must be coherent', () => {
   it('rejects skipping a phase whose gate is still required', () => {
     const issues = validateWorkflow(
-      wf({ pipeline: { skip: ['clarify'] }, hitl: { gates: ['G1', 'G2', 'G3'] } }),
+      wf({ pipeline: { skip: ['context'] }, hitl: { gates: ['G1', 'G2', 'G3'] } }),
       OrgPolicy.parse({ maxAutonomy: 'supervised' }), known,
     );
     expect(issues.find((i) => i.rule === 'W8')?.message).toContain('G1');
   });
 
+  it('rejects skipping a step whose gate is still required', () => {
+    const issues = validateWorkflow(
+      wf({ pipeline: { skipSteps: ['questions'] }, hitl: { gates: ['G1', 'G2', 'G3'] } }),
+      OrgPolicy.parse({ maxAutonomy: 'supervised' }), known,
+    );
+    expect(issues.find((i) => i.rule === 'W8')?.message).toContain('G1');
+  });
+
+  it('refuses to skip intake or preflight at all', () => {
+    for (const phase of ['intake', 'preflight']) {
+      const issues = validateWorkflow(
+        wf({ pipeline: { skip: [phase] }, hitl: { gates: ['G1', 'G2', 'G3'] } }),
+        DEFAULT_POLICY, known,
+      );
+      expect(issues.some((i) => i.message.includes('cannot be skipped'))).toBe(true);
+    }
+  });
+
   it('rejects verifying what was never implemented', () => {
     const issues = validateWorkflow(
-      wf({ pipeline: { skip: ['implement'] }, hitl: { gates: ['G2', 'G3'] } }),
+      wf({ pipeline: { skipSteps: ['implement'] }, hitl: { gates: ['G1', 'G2', 'G3'] } }),
       OrgPolicy.parse({ maxAutonomy: 'supervised' }), known,
     );
     expect(issues.some((i) => i.message.includes('nothing to verify'))).toBe(true);
@@ -161,15 +180,28 @@ describe('W8 — the remaining pipeline must be coherent', () => {
 
   it('rejects shipping without verification', () => {
     const issues = validateWorkflow(
-      wf({ pipeline: { skip: ['implement', 'verify'] }, hitl: { gates: ['G2', 'G3'] } }),
+      wf({ pipeline: { skipSteps: ['implement', 'verify'] }, hitl: { gates: ['G1', 'G2', 'G3'] } }),
       OrgPolicy.parse({ maxAutonomy: 'supervised' }), known,
     );
     expect(issues.some((i) => i.message.includes('nothing would machine-check'))).toBe(true);
   });
 
-  it('accepts the spike profile, which skips implement, verify and ship together', () => {
+  it('accepts the spike profile, which skips build and ship together', () => {
     const spike = BUILT_IN_WORKFLOWS.find((w) => w.name === 'spike')!;
     expect(validateWorkflow(spike, DEFAULT_POLICY, known)).toEqual([]);
+  });
+
+  it('keeps the step vocabulary and the step order in agreement', () => {
+    // W8 checks `skipSteps` against STEP_ORDER, so a step in the enum that no
+    // phase sequences — or sequences twice — would be unskippable or run
+    // twice, and neither failure announces itself.
+    const sequenced = Object.values(STEP_ORDER).flat();
+    expect(new Set(sequenced).size).toBe(sequenced.length);
+    const unsequenced = Object.keys(PHASE_OF_STEP).filter((s) => !sequenced.includes(s as never));
+    expect(unsequenced.sort()).toEqual(['human_review', 'repair']);
+    for (const [phase, steps] of Object.entries(STEP_ORDER)) {
+      for (const step of steps) expect(PHASE_OF_STEP[step]).toBe(phase);
+    }
   });
 });
 

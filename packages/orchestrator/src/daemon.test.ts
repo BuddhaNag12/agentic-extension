@@ -74,6 +74,7 @@ async function waitFor(
 }
 
 const phasesSeen = () => events.filter((e) => e.event.t === 'phase_entered').map((e) => (e.event as { phase: string }).phase);
+const stepsSeen = () => events.filter((e) => e.event.t === 'step_entered').map((e) => (e.event as { step: string }).step);
 const statusOf = async (runId: string) =>
   (await client.sendRequest<{ run: Run }>(Methods.getRun, { runId })).run.status;
 
@@ -92,7 +93,7 @@ describe('handshake and lifecycle', () => {
 });
 
 describe('a fake run walks the pipeline (M0 exit)', () => {
-  it('reaches done through exactly three human gates', async () => {
+  it('succeeds through exactly three human gates', async () => {
     await handshake();
     const { run } = await client.sendRequest<{ run: Run }>(Methods.createRun, {
       ticketKey: 'PAY-1423', summary: 'Checkout empty state',
@@ -113,8 +114,18 @@ describe('a fake run walks the pipeline (M0 exit)', () => {
     expect(await statusOf(run.id)).toBe('succeeded');
 
     expect(phasesSeen()).toEqual([
-      'intake', 'harvest', 'spec', 'clarify', 'plan', 'decompose',
-      'implement', 'verify', 'review', 'human_review', 'ship', 'done',
+      'intake', 'preflight', 'context', 'plan', 'build', 'review', 'ship',
+    ]);
+    // The finer work is visible as steps under those seven pills, not as
+    // pills of its own — which is the whole point of the §5.1 condensation.
+    expect(stepsSeen()).toEqual([
+      'classify', 'map_repo',
+      'check_auth', 'worktree', 'detect_gates', 'check_budget', 'baseline_gates',
+      'harvest', 'draft_spec', 'questions',
+      'draft_plan', 'validate_plan', 'decompose',
+      'implement', 'verify',
+      'auto_review', 'triage_findings', 'human_review',
+      'rebase',
     ]);
   });
 
@@ -154,7 +165,8 @@ describe('a fake run walks the pipeline (M0 exit)', () => {
     });
 
     await waitFor(async () => (await statusOf(run.id)) === 'cancelled', 'cancellation');
-    expect(phasesSeen()).not.toContain('implement');
+    expect(phasesSeen()).not.toContain('build');
+    expect(stepsSeen()).not.toContain('implement');
   });
 });
 
