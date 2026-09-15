@@ -11,3 +11,4 @@ export * from './phases/plan.js';
 export * from './phases/decompose.js';
 export * from './phases/implement.js';
 export * from './phases/repair.js';
+export * from './phases/review.js';

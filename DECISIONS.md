@@ -725,3 +725,49 @@ it matters: a red gate is exactly when deleting the test is tempting.
 
 `failingTestFilesFrom()` derives it from the gate's own failure set, so the
 guardrail now knows which tests are failing whenever a repair runs.
+
+## Decisions made building the reviewer
+
+### D51 — The reviewer cannot write, and cannot see how the change was made
+
+Two properties, both enforced rather than asked for.
+
+**Cold.** A fresh session every time, never a resume or a fork. §5.7's reason is
+that a reviewer inheriting the implementer's context inherits its blind spots
+and tends to ratify — which makes an automated review worse than none, because
+it launders an unreviewed change as a reviewed one.
+
+**Read-only.** An empty `allowedPaths` puts the session in plan mode, so the
+reviewer cannot fix what it finds. A reviewer that edits is no longer reviewing
+the change that was made, and the gates that went green went green on a
+different tree.
+
+### D52 — Conformance is computed; the model only judges it
+
+Which files the diff touched that no task predicted is a set comparison, and a
+model asked to do set comparison over a long list gets it wrong occasionally —
+in the direction that produces no finding. So `unplannedFiles()` computes it and
+hands the list over as fact; the model decides whether each is a reasonable
+consequence of the work or scope creep.
+
+The same split as everywhere else in the system: the deterministic part is
+deterministic, and the judgement is the model's (§1.4).
+
+### D53 — A review that could not run blocks, and the review→build cycle is bounded
+
+Two ways this could have failed quietly.
+
+A review that errors or returns an unparseable report **blocks** rather than
+passing an empty findings list to the human. An empty list reads as "nothing
+wrong"; the truth would be "nobody looked". Same reasoning as D16, one layer up.
+
+`review_findings` with blocking findings sends the change back to build, which
+re-verifies and re-reviews — a cycle nothing else closes. A reviewer that keeps
+reporting the same blocker would loop until the wall clock or the card ran out.
+`REVIEW_ROUND_LIMIT` is 2, matching the re-spec limit: a third round of the same
+argument is a question for a person, and G3 is where that question belongs.
+
+Anti-sycophancy is one re-review, not a loop, for the same reason in reverse:
+the point is to catch a reflexive pass, not to argue the reviewer into finding
+something. An empty second pass is accepted — a fabricated finding is worse than
+none.

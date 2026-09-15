@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   ClaudeProvider, claudeAuthStatus, claudeCliPath, decompose,
-  runHarvest, runImplement, runPlan, runRepair, runSpec, topoOrder,
+  runHarvest, runImplement, runPlan, runRepair, runReview, runSpec, topoOrder,
   type AgentProvider, type AgentTurn, type ContextDigest, type Plan, type Spec, type WorkPacket,
 } from '@agentflow/agent-runtime';
 import { GateRegistry, runGate, type GateAdapter } from '@agentflow/gates';
@@ -34,6 +34,8 @@ export interface RunArtifacts {
   taskCheckpoints?: Record<string, string>;
   /** What `verify` was red on when it handed off to the repair step. */
   repairing?: { gate: string; failures: GateReport['failures']; taskId: string };
+  /** How many times review has sent the change back to build (§5.7). */
+  reviewRounds?: number;
   /** Gates already red on the untouched base (§5.3), excluded from blame. */
   baselineFailures?: string[];
   /** Required gates whose adapter does not apply here (§5.3), recorded so
@@ -543,12 +545,104 @@ export class RealRunDriver {
       }
 
       // --- review (§5.7) -----------------------------------------------------
-      case 'auto_review':
-        // The four-pass cold reviewer lands with the review engine. Until then
-        // the run reaches the human with gate evidence and no automated
-        // findings — honestly empty rather than a fabricated pass.
-        say('automated review is not implemented yet; proceeding on gate evidence alone');
-        return this.step(runId, { kind: 'review_findings', blocking: 0 });
+      case 'auto_review': {
+        if (!state.worktree || !state.baseSha) {
+          return this.block(runId, 'no worktree: cannot review a change that is not there');
+        }
+        const tree = new WorktreeManager(this.paths.root);
+        const { patch, truncated } = await tree.diff(state.worktree, state.baseSha);
+        if (!patch.trim()) {
+          // Nothing to review is not a clean review. It means build produced no
+          // diff, which the gates cannot have verified either.
+          return this.block(runId, 'there is no diff to review');
+        }
+
+        const r = await runReview(this.provider, {
+          ticketKey: handle.run.ticket.key,
+          spec: state.spec,
+          plan: state.plan,
+          diff: patch,
+          diffTruncated: truncated,
+          changedFiles: (await tree.changedFiles(state.worktree, state.baseSha)).map((c) => c.path),
+          gateReports: handle.derived.gateResults.map((g) => ({
+            gate: g.gate, ok: g.ok, exitCode: g.ok ? 0 : 1,
+            durationMs: g.durationMs, failures: [], signature: g.signature,
+          })),
+          worktree: state.worktree,
+          workflow,
+        }, stream);
+        spend(r.usd, workflow.agents.reviewer?.model ?? 'opus');
+
+        if (!r.ok) {
+          // A review that could not run is not a clean review (D16's rule, and
+          // the same reasoning): passing the human an empty findings list would
+          // read as "nothing wrong" rather than "nobody looked".
+          return this.block(runId, `review failed: ${r.error ?? 'unknown'}`);
+        }
+
+        this.writeArtifact(runId, 'review', 1, r.report);
+        if (r.adversarialUsed) {
+          say('first pass found nothing on a large diff; took an adversarial second look (§5.7)');
+        }
+        for (const f of r.report?.findings ?? []) {
+          this.store.emitEvent(handle, {
+            t: 'log',
+            level: f.severity === 'blocker' || f.severity === 'major' ? 'warn' : 'info',
+            message: `[${f.severity}] ${f.file}${f.line ? `:${f.line}` : ''} — ${f.title}`,
+          });
+        }
+        if (r.unplannedFiles.length > 0) {
+          this.store.emitEvent(handle, {
+            t: 'log', level: 'warn',
+            message: `changed without being planned: ${r.unplannedFiles.join(', ')}`,
+          });
+        }
+        say(
+          `review: ${r.blocking} blocking, ` +
+          `${(r.report?.findings.length ?? 0) - r.blocking} advisory — ` +
+          `plan ${r.report?.planConformance.verdict ?? 'unclear'}`,
+        );
+
+        // Blocking findings go back to build as repair work; minor and nit
+        // reach the human without stopping the run (§5.7 REVIEW_CLEAR).
+        //
+        // Bounded, because review → repair → verify → review is a cycle and
+        // nothing else closes it: a reviewer that keeps finding the same
+        // blocker would otherwise loop until the wall clock or the card did.
+        // Past the limit the human decides, which is what G3 is for anyway.
+        const round = (state.reviewRounds ?? 0) + 1;
+        if (r.blocking > 0 && round > REVIEW_ROUND_LIMIT) {
+          this.store.emitEvent(handle, {
+            t: 'log', level: 'warn',
+            message:
+              `review still reports ${r.blocking} blocking finding(s) after ` +
+              `${REVIEW_ROUND_LIMIT} repair round(s); handing the decision to you`,
+          });
+          return this.step(runId, { kind: 'budget_exhausted', which: 'attempts' });
+        }
+
+        if (r.blocking > 0 && r.report) {
+          const worst = r.report.findings.find((f) => f.severity === 'blocker' || f.severity === 'major')!;
+          this.artifacts.set(runId, {
+            ...this.artifacts.get(runId),
+            reviewRounds: round,
+            repairing: {
+              gate: 'review',
+              taskId: (state.packets ?? []).at(-1)?.task.id ?? 'tree',
+              failures: r.report.findings
+                .filter((f) => f.severity === 'blocker' || f.severity === 'major')
+                .map((f) => ({
+                  ...(f.file ? { file: f.file } : {}),
+                  ...(f.line !== undefined ? { line: f.line } : {}),
+                  rule: f.severity,
+                  message: `${f.title} — ${f.evidence} Suggested: ${f.suggestedFix}`,
+                })),
+            },
+          });
+          say(`blocking finding: ${worst.title}`);
+        }
+        return this.step(runId, { kind: 'review_findings', blocking: r.blocking });
+      }
 
       case 'triage_findings':
         say('assembled the diff and gate reports for review');
@@ -902,7 +996,7 @@ export class RealRunDriver {
     }
   }
 
-  private writeArtifact(runId: string, kind: 'context' | 'spec' | 'plan', version: number, body: unknown): void {
+  private writeArtifact(runId: string, kind: 'context' | 'spec' | 'plan' | 'review', version: number, body: unknown): void {
     const handle = this.store.get(runId);
     if (!handle) return;
     const path = join(this.paths.runsDir, runId, 'artifacts', `${kind}.v${version}.json`);
@@ -926,6 +1020,13 @@ export class RealRunDriver {
     this.block(runId, err instanceof Error ? err.message : String(err));
   }
 }
+
+/**
+ * How many times review may send a change back to build before the human
+ * decides instead (§5.7). Two, matching the re-spec limit: a third round of
+ * the same argument is a question for a person, not another attempt.
+ */
+export const REVIEW_ROUND_LIMIT = 2;
 
 /** Kept so a green ladder still records a signature the repair loop can compare. */
 export const GREEN = failureSignature([]);

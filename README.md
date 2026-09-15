@@ -106,7 +106,7 @@ exercised deterministically and for free.
   card with the branch, commit list, diffstat, gate summary, the acceptance
   criteria as a manual checklist, and the `git push` to run yourself
 
-- 347 tests: state machine, replay (including a property test), the schema
+- 361 tests: state machine, replay (including a property test), the schema
   2.0.0 log migration, failure signatures, concurrency, workflow validation,
   real git worktrees and rebases, real gate execution, a ship integration test
   that asserts nothing reaches `origin`, and a daemon integration test over the
@@ -118,8 +118,16 @@ exercised deterministically and for free.
   the pre-task checkpoint on thrash, and a budget that escalates to a human
   rather than looping
 
-Not yet real: the cold reviewer (§5.7), the Work Inbox (§6), the PR review
-pipeline (§7), and Jira/Figma/GitHub.
+- **Review** (§5.7) — a single cold pass: a fresh, read-only session that sees
+  the spec, the approved plan, the diff and the gate reports, and nothing of
+  how the change was made. Severity-tagged findings with evidence and a
+  suggested fix; blocker and major go back to build as repair work, minor and
+  nit reach you without stopping the run. Unplanned files are computed, not
+  asked. A large diff that comes back empty gets one adversarial re-review
+
+Not yet real: §5.7's four narrow passes (this is one), the eval harness that
+measures whether any of it works, the Work Inbox (§6), the PR review pipeline
+(§7), and Jira/Figma/GitHub.
 
 ## Layout
 
@@ -153,7 +161,7 @@ Everything else is a separate script, each independently runnable:
 |---|---|
 | `npm run build` | Compiles all packages, then bundles the extension and the daemon |
 | `npm run typecheck` | `tsc -b` across every package; no emit |
-| `npm test` | 347 tests (`npm run test:watch` to iterate) |
+| `npm test` | 361 tests (`npm run test:watch` to iterate) |
 | `npm run package` | Produces `agentflow.vsix` |
 | `npm run clean` | Removes `dist/` and build info |
 

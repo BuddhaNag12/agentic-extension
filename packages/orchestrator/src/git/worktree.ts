@@ -301,6 +301,27 @@ export class WorktreeManager {
     });
   }
 
+  /**
+   * The unified diff against the base — what a reviewer actually reads.
+   *
+   * Bounded, and honest about it. An unbounded diff would silently fill the
+   * reviewer's context and push the spec and plan out of it, producing a review
+   * of the last few files that reads like a review of the change.
+   */
+  async diff(
+    worktreePath: string,
+    baseSha: string,
+    maxBytes = 240_000,
+  ): Promise<{ patch: string; truncated: boolean }> {
+    const { stdout } = await git(
+      worktreePath,
+      ['diff', '--no-color', '--unified=3', `${baseSha}..HEAD`],
+      true,
+    );
+    if (stdout.length <= maxBytes) return { patch: stdout, truncated: false };
+    return { patch: stdout.slice(0, maxBytes), truncated: true };
+  }
+
   /** `git diff --stat` against the base, for the handoff card. */
   async diffStat(worktreePath: string, baseSha: string): Promise<string> {
     const { stdout } = await git(worktreePath, ['diff', '--stat', `${baseSha}..HEAD`], true);
