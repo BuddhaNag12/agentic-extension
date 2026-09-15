@@ -1,11 +1,13 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  ClaudeProvider, claudeAuthStatus, claudeCliPath, decompose, runHarvest, runImplement, runPlan, runSpec, topoOrder,
+  ClaudeProvider, claudeAuthStatus, claudeCliPath, decompose,
+  runHarvest, runImplement, runPlan, runRepair, runSpec, topoOrder,
   type AgentProvider, type AgentTurn, type ContextDigest, type Plan, type Spec, type WorkPacket,
 } from '@agentflow/agent-runtime';
 import { GateRegistry, runGate, type GateAdapter } from '@agentflow/gates';
-import { failureSignature, type Effect } from '@agentflow/core';
+import type { GateReport, ResolvedWorkflow } from '@agentflow/protocol';
+import { classifyAttempt, failureSignature, shouldEscalate, type Effect } from '@agentflow/core';
 import type { Step } from '@agentflow/protocol';
 import type { WorkspacePaths } from '../paths.js';
 import { WorktreeManager } from '../git/worktree.js';
@@ -25,6 +27,13 @@ import type { RunStore } from './store.js';
  */
 
 export interface RunArtifacts {
+  /** What the last write touched — the diff rung 1 of §11.2 reasons about. */
+  lastTouched?: readonly string[];
+  /** Per-task `git stash create` sha, taken before the task edited anything.
+   *  Rung 4 rewinds to it, so it has to outlive the step that took it. */
+  taskCheckpoints?: Record<string, string>;
+  /** What `verify` was red on when it handed off to the repair step. */
+  repairing?: { gate: string; failures: GateReport['failures']; taskId: string };
   /** Gates already red on the untouched base (§5.3), excluded from blame. */
   baselineFailures?: string[];
   /** Required gates whose adapter does not apply here (§5.3), recorded so
@@ -362,11 +371,23 @@ export class RealRunDriver {
           // builds a commit object without touching the tree, so this is the
           // sha §11.2's rewind restores to — a repair loop with nothing to
           // rewind to can only go forwards.
-          const mark = await tree.checkpoint(state.worktree!);
+          // `git stash create` yields nothing on a clean tree, and the tree is
+          // clean before a task starts — the previous task committed. So the
+          // checkpoint would have been absent exactly when rung 4 needs it.
+          // HEAD *is* the right mark for "before this task": rewinding to it
+          // discards the task's uncommitted work and nothing else.
+          const mark = (await tree.checkpoint(state.worktree!)) ?? (await tree.head(state.worktree!));
           this.store.emitEvent(handle, {
             t: 'checkpoint', label: `before ${packet.task.id}`,
             ...(mark ? { commitSha: mark } : {}),
           });
+          if (mark) {
+            const prior = this.artifacts.get(runId) ?? {};
+            this.artifacts.set(runId, {
+              ...prior,
+              taskCheckpoints: { ...prior.taskCheckpoints, [packet.task.id]: mark },
+            });
+          }
 
           const r = await runImplement(this.provider, {
             packet, worktree: state.worktree!, workflow,
@@ -384,6 +405,7 @@ export class RealRunDriver {
           for (const path of r.filesTouched) {
             this.store.emitEvent(handle, { t: 'file_changed', path, op: 'modify', hunks: 1 });
           }
+          this.artifacts.set(runId, { ...this.artifacts.get(runId), lastTouched: r.filesTouched });
 
           // This task's own gates, on the tree as this task left it.
           this.store.emitEvent(handle, { t: 'task_status', taskId: packet.task.id, status: 'verifying' });
@@ -403,10 +425,26 @@ export class RealRunDriver {
               durationMs: report.durationMs, report,
             });
             if (!report.ok && !this.wasRedAtBaseline(runId, adapter.id)) {
-              this.store.emitEvent(handle, {
-                t: 'task_status', taskId: packet.task.id, status: 'repairing',
+              // Repair this task here rather than leaving the step: the commit
+              // must not happen until it is green, and the tasks after it have
+              // not been written yet (DECISIONS D38).
+              const fixed = await this.repairLoop({
+                runId, packet, workflow,
+                gate: adapter.id,
+                failures: report.failures,
+                rerun: async () => {
+                  const out: GateReport[] = [];
+                  for (const a of this.runnableGates(packet.gates, state.worktree!)) {
+                    out.push(await this.scheduler.gates.run(
+                      () => this.runGateIn(runId, a, state.worktree!, packet.task.files, threshold),
+                    ));
+                  }
+                  return out;
+                },
+                stream, spend,
               });
-              return this.step(runId, { kind: 'gate_failed', gate: adapter.id });
+              if (!fixed.ok) return this.escalate(runId, packet.task.id, fixed);
+              break;
             }
           }
 
@@ -449,16 +487,60 @@ export class RealRunDriver {
             durationMs: report.durationMs, report,
           });
           if (!report.ok && !this.wasRedAtBaseline(runId, adapter.id)) {
+            // A whole-tree failure leaves the step, because it is not any one
+            // task's problem — two tasks that each passed their own gates can
+            // still break each other. The machine moves to `repair`, which is
+            // what puts it on the board.
+            this.artifacts.set(runId, {
+              ...this.artifacts.get(runId),
+              repairing: {
+                gate: adapter.id,
+                failures: report.failures,
+                taskId: (state.packets ?? []).at(-1)?.task.id ?? 'tree',
+              },
+            });
             return this.step(runId, { kind: 'gate_failed', gate: adapter.id });
           }
         }
         return this.step(runId, { kind: 'gate_passed', gate: 'all' });
       }
 
-      case 'repair':
-        // The bounded convergence loop is §11 and lands with the correctness
-        // engine. Until then a failed gate is a stop, not a silent retry.
-        return this.block(runId, 'the repair loop is not implemented yet — gates are red');
+      case 'repair': {
+        // Whole-tree repair. The per-task loop runs inside `implement`, where
+        // the commit is still pending; this one runs against the ladder, and on
+        // success STEP_AFTER sends the run back to `verify` rather than onward
+        // — a repaired tree that skipped verification would reach review
+        // unverified.
+        const pending = state.repairing;
+        const packet = (state.packets ?? []).find((pk) => pk.task.id === pending?.taskId)
+          ?? (state.packets ?? []).at(-1);
+        if (!pending || !packet) {
+          return this.block(runId, 'the repair step was entered with nothing recorded as failing');
+        }
+
+        const fixed = await this.repairLoop({
+          runId, packet, workflow,
+          gate: pending.gate,
+          failures: pending.failures,
+          rerun: async () => {
+            const out: GateReport[] = [];
+            const files = (state.packets ?? []).flatMap((pk) => pk.task.files);
+            for (const a of this.runnableGates(workflow.pipeline.gates.required, state.worktree!)) {
+              out.push(await this.scheduler.gates.run(
+                () => this.runGateIn(runId, a, state.worktree!, files, threshold),
+              ));
+            }
+            return out;
+          },
+          stream, spend,
+        });
+        if (!fixed.ok) return this.escalate(runId, packet.task.id, fixed);
+
+        const { repairing: _done, ...rest } = this.artifacts.get(runId) ?? {};
+        this.artifacts.set(runId, rest);
+        say('repair converged; re-verifying the tree');
+        return this.step(runId, { kind: 'advance' });
+      }
 
       // --- review (§5.7) -----------------------------------------------------
       case 'auto_review':
@@ -602,6 +684,172 @@ export class RealRunDriver {
       }
     }
     return red;
+  }
+
+  /**
+   * Leave the repair loop the way §11.2's rungs 4 and 5 say to.
+   *
+   * Each exit is a different transition, and the machine owns all three: thrash
+   * rewinds the tree and hands the task back to the planner, an exhausted
+   * budget parks for a human, and a broken repair blocks. The rewind happens
+   * here rather than in the daemon's effect handler because this is what holds
+   * the checkpoint sha — an effect handler with no sha could only log.
+   */
+  private async escalate(
+    runId: string,
+    taskId: string,
+    outcome: { reason: 'thrash' | 'budget' | 'error'; detail: string; signature?: string },
+  ): Promise<void> {
+    const handle = this.store.get(runId);
+    const state = this.artifacts.get(runId);
+    if (!handle) return;
+
+    // Why the loop gave up is the first thing a human debugging this needs,
+    // and it is not recoverable from the transition alone.
+    this.store.emitEvent(handle, {
+      t: 'log', level: 'warn',
+      message: `repair on ${taskId} escalated (${outcome.reason}): ${outcome.detail}`,
+    });
+    this.store.emitEvent(handle, { t: 'task_status', taskId, status: 'abandoned' });
+
+    if (outcome.reason === 'thrash') {
+      const sha = state?.taskCheckpoints?.[taskId];
+      if (sha && state?.worktree) {
+        // Rung 4 actually rewinds. Replanning on top of a half-repaired tree
+        // would hand the planner a state no plan describes.
+        await new WorktreeManager(this.paths.root).restore(state.worktree, sha)
+          .then(() => this.store.emitEvent(handle, {
+            t: 'checkpoint', label: `rewound ${taskId} to its pre-task checkpoint`, commitSha: sha,
+          }))
+          .catch((err: Error) => this.store.emitEvent(handle, {
+            t: 'error', scope: 'rewind', message: `could not rewind ${taskId}: ${err.message}`, retryable: false,
+          }));
+      } else {
+        this.store.emitEvent(handle, {
+          t: 'log', level: 'warn',
+          message: `no checkpoint recorded for ${taskId}; replanning on the tree as it stands`,
+        });
+      }
+      return this.step(runId, { kind: 'thrash_detected', signature: outcome.signature ?? 'unknown' });
+    }
+
+    if (outcome.reason === 'budget') {
+      return this.step(runId, { kind: 'budget_exhausted', which: 'attempts' });
+    }
+    return this.block(runId, `repair failed on ${taskId}: ${outcome.detail}`);
+  }
+
+  /**
+   * The bounded convergence loop (§11).
+   *
+   * One of these runs wherever a gate goes red, and it is the only thing that
+   * may write after a failure. It returns rather than throwing, because every
+   * way out of it is a different transition: green resumes, thrash rewinds and
+   * replans, an exhausted budget escalates to a human.
+   *
+   * `rerun` re-runs whatever gates were red — the caller knows whether that is
+   * one task's set or the whole tree, and re-running the wrong one would
+   * declare victory on a different question than the one that failed.
+   */
+  private async repairLoop(args: {
+    runId: string;
+    packet: WorkPacket;
+    workflow: ResolvedWorkflow;
+    gate: string;
+    failures: readonly GateReport['failures'][number][];
+    rerun: () => Promise<GateReport[]>;
+    stream: (turn: AgentTurn) => void;
+    spend: (usd: number, model: string) => void;
+  }): Promise<
+    | { ok: true }
+    | { ok: false; reason: 'thrash' | 'budget' | 'error'; detail: string; signature?: string }
+  > {
+    const { runId, packet, workflow, rerun, stream, spend } = args;
+    const handle = this.store.get(runId);
+    if (!handle) return { ok: false, reason: 'error', detail: 'run vanished' };
+
+    const budget = Math.max(1, workflow.budgets.attemptsPerTask);
+    // Oldest-first, excluding the attempt being classified (§11.1).
+    //
+    // Deliberately *not* seeded with the failure that triggered the loop. If it
+    // were, a first attempt that changed nothing would read as a repeat and
+    // escalate immediately — skipping rung 2, which exists for exactly that
+    // case ("the obvious fix did not work, read the test in full"). Thrash is
+    // two *attempts* agreeing, not one attempt failing to move the needle.
+    const signatures: string[] = [];
+    const approaches: string[] = [];
+    let gate = args.gate;
+    let failures = [...args.failures];
+
+    for (let attempt = 1; attempt <= budget; attempt += 1) {
+      if (this.cancelled.has(runId)) return { ok: false, reason: 'error', detail: 'cancelled' };
+
+      this.store.emitEvent(handle, { t: 'task_status', taskId: packet.task.id, status: 'repairing', attempt });
+
+      const r = await runRepair(this.provider, {
+        packet,
+        worktree: this.artifacts.get(runId)?.worktree ?? '',
+        workflow,
+        gate,
+        failures,
+        attempt,
+        priorApproaches: approaches,
+        recentlyTouched: [...(this.artifacts.get(runId)?.lastTouched ?? [])],
+      }, stream);
+      spend(r.usd, workflow.agents.repair?.model ?? 'sonnet');
+
+      for (const denied of r.denied) {
+        // A refusal here is the anti-pattern layer doing its job (§11.3), and
+        // it is the most interesting thing that can happen in a repair.
+        this.store.emitEvent(handle, {
+          t: 'log', level: 'warn',
+          message: `repair blocked [${denied.rule}] ${denied.command ?? denied.path ?? denied.tool}`,
+        });
+      }
+      if (!r.ok) return { ok: false, reason: 'error', detail: r.error ?? 'repair failed' };
+
+      this.store.emitEvent(handle, {
+        t: 'log', level: 'info',
+        message: `repair attempt ${attempt} (${r.rung}): ${r.report?.diagnosis ?? ''}`,
+      });
+      if (r.report?.approach) approaches.push(r.report.approach);
+      for (const path of r.filesTouched) {
+        this.store.emitEvent(handle, { t: 'file_changed', path, op: 'modify', hunks: 1 });
+      }
+
+      const reports = await rerun();
+      for (const report of reports) {
+        this.store.emitEvent(handle, {
+          t: 'gate_result', gate: report.gate, ok: report.ok,
+          durationMs: report.durationMs, report,
+        });
+      }
+
+      const red = reports.filter((rep) => !rep.ok && !this.wasRedAtBaseline(runId, rep.gate));
+      if (red.length === 0) return { ok: true };
+
+      failures = red.flatMap((rep) => rep.failures);
+      gate = red[0]!.gate;
+
+      // §11.1: the signature is the loop's only progress metric. A repeat or an
+      // oscillation means more attempts of the same kind will not help, and
+      // spending the rest of the budget to prove it is the thrash the budget
+      // exists to stop.
+      const signature = failureSignature(failures);
+      const verdict = classifyAttempt(signatures, signature);
+      signatures.push(signature);
+      if (shouldEscalate(verdict)) {
+        return {
+          ok: false, reason: 'thrash', signature,
+          detail: `${verdict.kind} of failure signature ${signature} after ${attempt} attempt(s)`,
+        };
+      }
+    }
+
+    return {
+      ok: false, reason: 'budget',
+      detail: `${budget} repair attempts did not converge on ${packet.task.id}`,
+    };
   }
 
   /**

@@ -34,7 +34,9 @@ Intake ─▶ Preflight ─▶ Context ─▶ Plan ─▶ Build ─▶ Review �
 
 `build` cycles per task in DAG order — checkpoint, implement, that task's
 declared gates, **commit on green** — so history stays bisectable and a failing
-task leaves the green ones landed. `verify` is then the whole-tree
+task leaves the green ones landed. A red gate enters the repair loop rather than
+stopping: the task's own gates repair inline (its commit is still pending), a
+whole-tree failure moves to the `repair` step and returns to `verify`. `verify` is then the whole-tree
 `ALL_GATES_GREEN` pass, because two tasks can each pass their own gates and
 still break each other.
 
@@ -104,15 +106,20 @@ exercised deterministically and for free.
   card with the branch, commit list, diffstat, gate summary, the acceptance
   criteria as a manual checklist, and the `git push` to run yourself
 
-- 332 tests: state machine, replay (including a property test), the schema
+- 347 tests: state machine, replay (including a property test), the schema
   2.0.0 log migration, failure signatures, concurrency, workflow validation,
   real git worktrees and rebases, real gate execution, a ship integration test
   that asserts nothing reaches `origin`, and a daemon integration test over the
   real socket
 
-Not yet real: the repair loop (§11) — a red gate blocks rather than retrying —
-the cold reviewer (§5.7), the Work Inbox (§6), the PR review pipeline (§7), and
-Jira/Figma/GitHub.
+- **Repair** (§11) — the bounded convergence loop: rungs 1–3 of §11.2's ladder
+  (local fix, widen context, rethink on the escalation model in a fresh
+  session), failure signatures as the only progress metric, a real rewind to
+  the pre-task checkpoint on thrash, and a budget that escalates to a human
+  rather than looping
+
+Not yet real: the cold reviewer (§5.7), the Work Inbox (§6), the PR review
+pipeline (§7), and Jira/Figma/GitHub.
 
 ## Layout
 
@@ -146,7 +153,7 @@ Everything else is a separate script, each independently runnable:
 |---|---|
 | `npm run build` | Compiles all packages, then bundles the extension and the daemon |
 | `npm run typecheck` | `tsc -b` across every package; no emit |
-| `npm test` | 332 tests (`npm run test:watch` to iterate) |
+| `npm test` | 347 tests (`npm run test:watch` to iterate) |
 | `npm run package` | Produces `agentflow.vsix` |
 | `npm run clean` | Removes `dist/` and build info |
 

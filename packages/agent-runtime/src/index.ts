@@ -10,3 +10,4 @@ export * from './phases/spec.js';
 export * from './phases/plan.js';
 export * from './phases/decompose.js';
 export * from './phases/implement.js';
+export * from './phases/repair.js';

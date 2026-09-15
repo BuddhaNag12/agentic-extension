@@ -665,3 +665,63 @@ unconditionally true by design ("a secret scan is not something a repo opts
 into"), so on a machine without `gitleaks` it fails — correctly, per D16 — and
 before this every run in such a repo would have blocked at `verify` with the
 repair loop unimplemented. The baseline run sees the same red and excludes it.
+
+## Decisions made building the repair loop
+
+### D46 — Thrash is two attempts agreeing, not one attempt failing
+
+The loop's signature history is deliberately **not** seeded with the failure
+that triggered it. Seeding it meant a first attempt that changed nothing read as
+a `repeat` and escalated immediately — skipping rung 2 of §11.2, which exists
+for precisely that case ("the obvious fix did not work; read the failing test in
+full"). §11.1's rule is about the loop repeating *itself*, so the comparison is
+between attempts.
+
+### D47 — The per-task loop runs inside `implement`; the whole-tree loop is a step
+
+Two loops, one helper, because they fail differently.
+
+A **task's own gates** going red is that task's problem, and its commit is still
+pending — so the loop runs inline inside `implement`, where the task cycle and
+the uncommitted tree both live. Leaving the step would strand the tasks after it,
+which have not been written yet (D38).
+
+A **whole-tree** `verify` failure is nobody's task in particular — two tasks that
+each passed their own gates can still break each other — so it emits
+`gate_failed`, the machine moves to the `repair` step, and `STEP_AFTER` sends it
+back to `verify` on success. That also puts repair on the board, which the
+inline loop cannot do without writing `step_entered` events outside the machine
+and breaking the invariant that the log and the machine agree.
+
+### D48 — `git stash create` is not a checkpoint of a clean tree
+
+`WorktreeManager.checkpoint()` returns `git stash create`, which outputs
+**nothing** when the tree is clean — and the tree is always clean before a task
+starts, because the previous task committed. So the pre-task checkpoint was
+absent in exactly the situation rung 4 needs it, and the rewind would have found
+nothing to rewind to.
+
+`HEAD` is the correct mark for "before this task": rewinding to it discards the
+task's uncommitted work and nothing else. The driver falls back to it.
+
+This is the second time this subsystem was built and never exercised —
+`rewind_to_task_checkpoint` also only wrote a log line and never called
+`restore()`. Both were invisible until something actually took the path.
+
+### D49 — The rewind happens in the driver, not the daemon's effect handler
+
+`rewind_to_task_checkpoint` reaches the daemon, which has no worktree and no
+checkpoint sha, so it could only ever log — which is what it did. The driver
+holds both, so it performs the restore before emitting `thrash_detected`.
+Replanning on a half-repaired tree would hand the planner a state that no plan
+describes.
+
+### D50 — Naming the failing tests is what makes the anti-pattern real
+
+`GuardrailContext.failingTestFiles` was plumbed through every phase and **never
+populated by anything**. The §11.3 rule it feeds — refuse an edit that strips
+assertions from a failing test — was therefore inert, and inert in the one place
+it matters: a red gate is exactly when deleting the test is tempting.
+
+`failingTestFilesFrom()` derives it from the gate's own failure set, so the
+guardrail now knows which tests are failing whenever a repair runs.
