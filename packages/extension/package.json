@@ -1,6 +1,6 @@
 {
   "name": "agentflow",
-  "displayName": "AgentFlow \u2014 Ticket to PR",
+  "displayName": "AgentFlow — Ticket to PR",
   "description": "Turn a ticket into a reviewed, tested, gated pull request",
   "version": "0.0.1",
   "private": true,

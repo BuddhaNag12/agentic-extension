@@ -17,6 +17,10 @@ export class GitError extends Error {
 export interface GitResult {
   stdout: string;
   stderr: string;
+  /** 0 on success. Only meaningful with `allowFail`, where a non-zero exit is
+   *  the answer rather than an error — inferring failure from stderr text
+   *  instead is how a passing command gets read as a failing one. */
+  exitCode: number;
 }
 
 /**
@@ -37,10 +41,10 @@ export async function git(cwd: string, args: string[], allowFail = false): Promi
         GIT_OPTIONAL_LOCKS: '0',
       },
     });
-    return { stdout, stderr };
+    return { stdout, stderr, exitCode: 0 };
   } catch (err) {
     const e = err as { code?: number; stderr?: string; stdout?: string };
-    if (allowFail) return { stdout: e.stdout ?? '', stderr: e.stderr ?? '' };
+    if (allowFail) return { stdout: e.stdout ?? '', stderr: e.stderr ?? '', exitCode: e.code ?? 1 };
     throw new GitError(args, e.code ?? null, e.stderr ?? String(err));
   }
 }

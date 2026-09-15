@@ -19,6 +19,24 @@ export interface WorktreeInfo {
   headSha: string;
 }
 
+export interface RebaseResult {
+  ok: boolean;
+  /** Where the branch ended up. Unchanged from before the attempt on failure. */
+  head: string;
+  ontoSha: string;
+  /** Files git could not merge. Empty when a rebase failed for another reason. */
+  conflicts: string[];
+  /** Present on failure: what git said, first line. */
+  reason?: string;
+  /** True when the branch was already on top of the base and nothing moved. */
+  alreadyCurrent: boolean;
+}
+
+export interface CommitSummary {
+  sha: string;
+  subject: string;
+}
+
 export interface CreateWorktreeInput {
   ticketKey: string;
   baseRef: string;
@@ -221,6 +239,72 @@ export class WorktreeManager {
     const full = body ? `${message}\n\n${body}` : message;
     await git(worktreePath, ['commit', '--no-verify', '-m', full]);
     return this.head(worktreePath);
+  }
+
+  /**
+   * Rebase the run's branch onto its base (§5.8 step 1).
+   *
+   * A textual conflict aborts and reports, and auto-resolution is never
+   * attempted (§13.3): a machine-resolved conflict is a silent semantic change
+   * in code a human already approved at G3, which is the worst possible place
+   * to guess. The abort matters as much as the report — leaving the tree
+   * mid-rebase would strand the run in a state nothing else knows how to read.
+   */
+  async rebase(worktreePath: string, ontoRef: string): Promise<RebaseResult> {
+    const ontoSha = await this.resolveBase(ontoRef);
+    const before = await this.head(worktreePath);
+
+    // Rebasing a dirty tree fails halfway and leaves a mess. The caller
+    // commits per task, so anything uncommitted here is unexplained.
+    if (await this.isDirty(worktreePath)) {
+      return {
+        ok: false, head: before, ontoSha, conflicts: [], alreadyCurrent: false,
+        reason: 'worktree has uncommitted changes; nothing should be uncommitted by ship',
+      };
+    }
+
+    // Already on top of the base: the rebase is a no-op, worth reporting so the
+    // caller can say "nothing to rebase" rather than implying work happened.
+    const ancestor = await git(worktreePath, ['merge-base', '--is-ancestor', ontoSha, 'HEAD'], true);
+    const alreadyCurrent = ancestor.exitCode === 0;
+
+    const result = await git(worktreePath, ['rebase', ontoSha], true);
+    if (result.exitCode === 0) {
+      return { ok: true, head: await this.head(worktreePath), ontoSha, conflicts: [], alreadyCurrent };
+    }
+
+    const conflicts = (await git(worktreePath, ['diff', '--name-only', '--diff-filter=U'], true))
+      .stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+    await git(worktreePath, ['rebase', '--abort'], true);
+
+    const said = `${result.stderr}\n${result.stdout}`.trim().split('\n').map((l) => l.trim());
+    return {
+      ok: false,
+      head: await this.head(worktreePath),
+      ontoSha,
+      conflicts,
+      alreadyCurrent,
+      reason: said.find((l) => /CONFLICT|could not apply/i.test(l)) ?? said[0] ?? 'rebase failed',
+    };
+  }
+
+  /** Commits this branch has that the base does not — the PR's commit list. */
+  async commitsSince(worktreePath: string, baseSha: string): Promise<CommitSummary[]> {
+    const { stdout } = await git(
+      worktreePath,
+      ['log', '--format=%H%x00%s', `${baseSha}..HEAD`],
+      true,
+    );
+    return stdout.split('\n').map((l) => l.trim()).filter(Boolean).map((line) => {
+      const [sha = '', subject = ''] = line.split('\u0000');
+      return { sha, subject };
+    });
+  }
+
+  /** `git diff --stat` against the base, for the handoff card. */
+  async diffStat(worktreePath: string, baseSha: string): Promise<string> {
+    const { stdout } = await git(worktreePath, ['diff', '--stat', `${baseSha}..HEAD`], true);
+    return stdout.trimEnd();
   }
 
   /**

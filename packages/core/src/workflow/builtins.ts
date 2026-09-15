@@ -52,9 +52,15 @@ export const BUILT_IN_WORKFLOWS: WorkflowDefinition[] = [
     name: 'bug',
     displayName: 'Bug',
     description: 'Reproduction test first: a test that fails before the fix and passes after.',
+    // No `repro_test` gate: PLAN_VALID's rule P6 already rejects a bug plan
+    // whose first task is not a failing reproduction test, which is where the
+    // requirement is actually enforceable. Declaring it here as well named a
+    // gate no adapter implements, and an unimplemented required gate was
+    // silently skipped — a `bug` run reported ALL_GATES_GREEN having never run
+    // the one check the profile exists for (DECISIONS D44).
     pipeline: {
       skip: [], skipSteps: [], waitForCi: false,
-      gates: { required: [...STANDARD_GATES, 'repro_test'], coverageThreshold: 0.8 },
+      gates: { required: STANDARD_GATES, coverageThreshold: 0.8 },
     },
   }),
 
@@ -74,6 +80,10 @@ export const BUILT_IN_WORKFLOWS: WorkflowDefinition[] = [
     name: 'refactor',
     displayName: 'Refactor',
     description: 'Behaviour-preserving: existing tests unchanged and green, no new public API.',
+    // `behaviour_preservation` has no adapter yet, so preflight refuses this
+    // workflow by name rather than running it without the one gate that makes
+    // it a refactor rather than a rewrite. Blocking is the honest state: it was
+    // previously declared and silently skipped.
     pipeline: {
       skip: [], skipSteps: [], waitForCi: false,
       gates: { required: [...STANDARD_GATES, 'behaviour_preservation'], coverageThreshold: 0.8 },

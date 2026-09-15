@@ -1,6 +1,7 @@
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  ClaudeProvider, decompose, runHarvest, runImplement, runPlan, runSpec, topoOrder,
+  ClaudeProvider, claudeAuthStatus, claudeCliPath, decompose, runHarvest, runImplement, runPlan, runSpec, topoOrder,
   type AgentProvider, type AgentTurn, type ContextDigest, type Plan, type Spec, type WorkPacket,
 } from '@agentflow/agent-runtime';
 import { GateRegistry, runGate, type GateAdapter } from '@agentflow/gates';
@@ -9,6 +10,7 @@ import type { Step } from '@agentflow/protocol';
 import type { WorkspacePaths } from '../paths.js';
 import { WorktreeManager } from '../git/worktree.js';
 import type { Scheduler } from '../scheduler.js';
+import { prPackage } from './prPackage.js';
 import type { RunStore } from './store.js';
 
 /**
@@ -25,6 +27,9 @@ import type { RunStore } from './store.js';
 export interface RunArtifacts {
   /** Gates already red on the untouched base (§5.3), excluded from blame. */
   baselineFailures?: string[];
+  /** Required gates whose adapter does not apply here (§5.3), recorded so
+   *  their absence is visible rather than silent. */
+  undetectedGates?: string[];
   digest?: ContextDigest;
   spec?: Spec;
   plan?: Plan;
@@ -111,6 +116,7 @@ export class RealRunDriver {
         t: 'cost', usd, inputTokens: 0, outputTokens: 0, model,
       });
     const stream = (turn: AgentTurn) => this.emitTurn(runId, turn);
+    const threshold = workflow.pipeline.gates.coverageThreshold;
 
     switch (step) {
       // --- intake (§5.2) -----------------------------------------------------
@@ -125,10 +131,31 @@ export class RealRunDriver {
         return this.step(runId, { kind: 'advance' });
 
       // --- preflight (§5.3) --------------------------------------------------
-      case 'check_auth':
-        // The Agent SDK drives the Claude Code CLI, which resolves its own
-        // credentials; Jira/GitHub auth arrives with the integration layer.
+      case 'check_auth': {
+        // §5.3 exists because most agent-run failures are environmental, and
+        // finding one at minute 25 wastes both money and trust. A missing CLI
+        // is exactly that: without this check it surfaces three steps later as
+        // a spawn failure inside harvest, which reads like a code problem.
+        //
+        // Jira/GitHub auth joins this list with the integration layer.
+        const cli = claudeCliPath();
+        if (!cli) {
+          return this.block(
+            runId,
+            'the Claude Code CLI is not on PATH. Install it, or set ' +
+            'AGENTFLOW_CLAUDE_PATH to the `claude` binary.',
+          );
+        }
+
+        const auth = await claudeAuthStatus(cli);
+        if (auth.state === 'signed_out') return this.block(runId, auth.detail);
+        if (auth.state === 'unknown') {
+          // Not evidence of being signed out, so it warns rather than blocks.
+          say(`could not confirm CLI authentication (${auth.detail}); continuing`);
+        }
+        say(`driving the Claude Code CLI at ${cli}`);
         return this.step(runId, { kind: 'advance' });
+      }
 
       case 'worktree': {
         const tree = new WorktreeManager(this.paths.root);
@@ -151,10 +178,45 @@ export class RealRunDriver {
 
       case 'detect_gates': {
         if (!state.worktree) return this.block(runId, 'no worktree: preflight did not complete');
-        const detected = this.gates.detect({ root: state.worktree, files: [] });
-        say(detected.length > 0
-          ? `gate adapters detected: ${detected.map((a) => a.id).join(', ')}`
+        const required = workflow.pipeline.gates.required;
+        const { adapters, missing } = this.gates.resolve(required);
+
+        // §5.3 separates two failures the registry used to conflate, and the
+        // difference decides whether a run may start at all.
+        //
+        // No adapter for a required gate means *the system* cannot run what
+        // this workflow declares. Letting that pass would report
+        // ALL_GATES_GREEN over a gate that never existed — a `bug` run would
+        // claim success having never run its reproduction test, which is the
+        // whole point of the profile.
+        if (missing.length > 0) {
+          return this.block(
+            runId,
+            `the "${handle.run.workflow}" workflow requires ${missing.join(', ')}, ` +
+            'which no gate adapter implements. Remove it from the workflow or ' +
+            'implement an adapter — a declared gate that cannot run is not a gate.',
+          );
+        }
+
+        // An adapter that exists but does not detect means *this repo* does not
+        // support it. §5.3 says warn and continue; it is recorded so the gate's
+        // absence is visible rather than inferred from a shorter list later.
+        const repo = { root: state.worktree, files: [] };
+        const undetected = adapters.filter((a) => !a.detect(repo)).map((a) => a.id);
+        const runnable = adapters.filter((a) => a.detect(repo)).map((a) => a.id);
+
+        say(runnable.length > 0
+          ? `gate adapters detected: ${runnable.join(', ')}`
           : 'no gate adapter matched this repository');
+        if (undetected.length > 0) {
+          this.store.emitEvent(handle, {
+            t: 'log', level: 'warn',
+            message:
+              `not runnable in this repository and will be skipped: ${undetected.join(', ')}. ` +
+              'The run cannot be verified against them.',
+          });
+        }
+        this.artifacts.set(runId, { ...state, undetectedGates: undetected });
         return this.step(runId, { kind: 'advance' });
       }
 
@@ -167,11 +229,13 @@ export class RealRunDriver {
         // recorded now so the implementer is not blamed for a broken main and
         // does not burn its repair budget chasing them.
         if (!state.worktree) return this.block(runId, 'no worktree: preflight did not complete');
-        const { adapters } = this.gates.resolve(workflow.pipeline.gates.required);
+        const adapters = this.runnableGates(workflow.pipeline.gates.required, state.worktree);
         const baseline: string[] = [];
-        if (adapters.length === 0) say('no gate adapter for the required gates; baseline unknown');
+        if (adapters.length === 0) say('no gate applies to this repository; baseline unknown');
         for (const adapter of adapters) {
-          const report = await this.scheduler.gates.run(() => this.runOne(runId, adapter, state));
+          const report = await this.scheduler.gates.run(
+            () => this.runGateIn(runId, adapter, state.worktree!, [], threshold),
+          );
           this.store.emitEvent(handle, {
             t: 'gate_result', gate: adapter.id, ok: report.ok,
             durationMs: report.durationMs, report,
@@ -279,10 +343,30 @@ export class RealRunDriver {
       }
 
       // --- build (§5.6) ------------------------------------------------------
+      //
+      // The task cycle lives here rather than in the state machine. §5.6 cycles
+      // implement → verify → repair *per task* in DAG order, and doing that at
+      // the FSM level would need the task list in `MachineState`. What matters
+      // is the ordering, and it is load-bearing: implementing every task before
+      // verifying any of them would make each task's gates read a tree
+      // containing the next task's half-finished work, and `git add` at commit
+      // time would sweep those files into the wrong commit. The step names stay
+      // the phase's shape for the board; `verify` is the whole-tree gate.
       case 'implement': {
+        const tree = new WorktreeManager(this.paths.root);
         for (const packet of state.packets ?? []) {
           if (this.cancelled.has(runId)) return;
           this.store.emitEvent(handle, { t: 'task_status', taskId: packet.task.id, status: 'active' });
+
+          // Checkpoint *before* the task edits (§5.6). `git stash create`
+          // builds a commit object without touching the tree, so this is the
+          // sha §11.2's rewind restores to — a repair loop with nothing to
+          // rewind to can only go forwards.
+          const mark = await tree.checkpoint(state.worktree!);
+          this.store.emitEvent(handle, {
+            t: 'checkpoint', label: `before ${packet.task.id}`,
+            ...(mark ? { commitSha: mark } : {}),
+          });
 
           const r = await runImplement(this.provider, {
             packet, worktree: state.worktree!, workflow,
@@ -300,33 +384,75 @@ export class RealRunDriver {
           for (const path of r.filesTouched) {
             this.store.emitEvent(handle, { t: 'file_changed', path, op: 'modify', hunks: 1 });
           }
+
+          // This task's own gates, on the tree as this task left it.
           this.store.emitEvent(handle, { t: 'task_status', taskId: packet.task.id, status: 'verifying' });
+          const adapters = this.runnableGates(packet.gates, state.worktree!);
+          if (adapters.length === 0) {
+            // A task whose declared check has no adapter is unverified, and
+            // unverified is a failure — never a pass by absence (D16).
+            say(`no gate adapter matched ${packet.task.id}'s declared checks`);
+            return this.step(runId, { kind: 'gate_failed', gate: 'none' });
+          }
+          for (const adapter of adapters) {
+            const report = await this.scheduler.gates.run(
+              () => this.runGateIn(runId, adapter, state.worktree!, packet.task.files, threshold),
+            );
+            this.store.emitEvent(handle, {
+              t: 'gate_result', gate: adapter.id, ok: report.ok,
+              durationMs: report.durationMs, report,
+            });
+            if (!report.ok && !this.wasRedAtBaseline(runId, adapter.id)) {
+              this.store.emitEvent(handle, {
+                t: 'task_status', taskId: packet.task.id, status: 'repairing',
+              });
+              return this.step(runId, { kind: 'gate_failed', gate: adapter.id });
+            }
+          }
+
+          // §5.6: the commit happens per task, *after* its gates pass, so the
+          // history is bisectable and a red task leaves the green ones landed.
+          const sha = await this.commitTask(runId, tree, packet, state);
+          this.store.emitEvent(handle, { t: 'task_status', taskId: packet.task.id, status: 'done' });
+          if (sha) {
+            this.store.emitEvent(handle, {
+              t: 'checkpoint', label: `${packet.task.id} committed`, commitSha: sha,
+            });
+          }
         }
         return this.step(runId, { kind: 'advance' });
       }
 
       case 'verify': {
-        // Deterministic, and it runs the gates the *tasks declared* — not gates
-        // inferred from filenames. The check said how; this obeys it.
-        const requested = new Set((state.packets ?? []).flatMap((p) => p.gates));
-        const { adapters } = this.gates.resolve([...requested]);
+        // ALL_GATES_GREEN is about the whole tree, not the last task: two tasks
+        // can each pass their own gates and still break each other. Every task
+        // is already committed and green on its own by the time this runs.
+        const files = (state.packets ?? []).flatMap((p) => p.task.files);
+        const { missing } = this.gates.resolve(workflow.pipeline.gates.required);
+        // Preflight already refused this, so reaching it means the registry
+        // changed underneath the run. ALL_GATES_GREEN is a claim about the
+        // *required* set, and it cannot be made without one of them.
+        if (missing.length > 0) {
+          return this.block(runId, `cannot claim ALL_GATES_GREEN: no adapter for ${missing.join(', ')}`);
+        }
+        const adapters = this.runnableGates(workflow.pipeline.gates.required, state.worktree!);
         if (adapters.length === 0) {
-          say('no gate adapter matched the declared checks; treating as unverified');
+          say('no gate adapter matched the required gates; the tree is unverified');
           return this.step(runId, { kind: 'gate_failed', gate: 'none' });
         }
-
-        let allGreen = true;
         for (const adapter of adapters) {
-          const report = await this.scheduler.gates.run(() => this.runOne(runId, adapter, state));
+          const report = await this.scheduler.gates.run(
+            () => this.runGateIn(runId, adapter, state.worktree!, files, threshold),
+          );
           this.store.emitEvent(handle, {
             t: 'gate_result', gate: adapter.id, ok: report.ok,
             durationMs: report.durationMs, report,
           });
-          if (!report.ok) { allGreen = false; break; }
+          if (!report.ok && !this.wasRedAtBaseline(runId, adapter.id)) {
+            return this.step(runId, { kind: 'gate_failed', gate: adapter.id });
+          }
         }
-        return this.step(runId, allGreen
-          ? { kind: 'gate_passed', gate: 'all' }
-          : { kind: 'gate_failed', gate: 'ladder' });
+        return this.step(runId, { kind: 'gate_passed', gate: 'all' });
       }
 
       case 'repair':
@@ -351,11 +477,67 @@ export class RealRunDriver {
         return;
 
       // --- ship (§5.8) -------------------------------------------------------
-      case 'rebase':
-        // Rebase, the re-run of the ladder on the rebased tree, and the PR
-        // package are the rest of the deliver slice. Stopping here is the
-        // honest outcome rather than reporting a PR that does not exist.
-        return this.block(runId, 'ship is not implemented yet — the branch is ready in the worktree');
+      case 'rebase': {
+        const tree = new WorktreeManager(this.paths.root);
+        const worktree = state.worktree!;
+
+        // 1. Rebase onto the base. A conflict blocks (§13.3) — auto-resolution
+        //    would be a silent semantic change to code approved at G3.
+        const rebased = await tree.rebase(worktree, handle.run.repo.baseRef);
+        if (!rebased.ok) {
+          const where = rebased.conflicts.length > 0
+            ? `: ${rebased.conflicts.join(', ')}`
+            : '';
+          return this.block(runId, `rebase onto ${handle.run.repo.baseRef} conflicted${where} — ${rebased.reason}`);
+        }
+        say(rebased.alreadyCurrent
+          ? `already on top of ${handle.run.repo.baseRef}; nothing to rebase`
+          : `rebased onto ${handle.run.repo.baseRef} (${rebased.ontoSha.slice(0, 7)})`);
+
+        // 2. Re-run the ladder. The earlier green was on a different tree, so
+        //    it is evidence about a tree that no longer exists.
+        const shipFiles = (state.packets ?? []).flatMap((p) => p.task.files);
+        const adapters = this.runnableGates(workflow.pipeline.gates.required, worktree);
+        for (const adapter of adapters) {
+          const report = await this.scheduler.gates.run(
+            () => this.runGateIn(runId, adapter, worktree, shipFiles, threshold),
+          );
+          this.store.emitEvent(handle, {
+            t: 'gate_result', gate: adapter.id, ok: report.ok,
+            durationMs: report.durationMs, report,
+          });
+          if (!report.ok && !this.wasRedAtBaseline(runId, adapter.id)) {
+            return this.block(runId, `${adapter.id} failed on the rebased tree; the earlier green was a different tree`);
+          }
+        }
+
+        // 3. Assemble the PR package locally. Nothing leaves the machine.
+        const commits = await tree.commitsSince(worktree, rebased.ontoSha);
+        if (commits.length === 0) {
+          return this.block(runId, 'nothing to ship: the branch has no commits over its base');
+        }
+        const body = prPackage({
+          run: handle.run,
+          spec: state.spec,
+          plan: state.plan,
+          commits,
+          diffstat: await tree.diffStat(worktree, rebased.ontoSha),
+          gates: handle.derived.gateResults,
+          baseSha: rebased.ontoSha,
+        });
+        const path = this.writeText(runId, 'pr-package.md', body);
+        this.store.emitEvent(handle, {
+          t: 'artifact_written', kind: 'prpackage', version: 1, path,
+        });
+
+        // 4. Hand off. The push is the first irreversible, externally visible
+        //    step, and §5.8 leaves it to a human by default.
+        say(
+          `ready to push: ${handle.run.branch} — ${commits.length} commit(s) over ` +
+          `${rebased.ontoSha.slice(0, 7)}. PR body in ${path}`,
+        );
+        return this.step(runId, { kind: 'advance' });
+      }
 
       case 'push':
       case 'publish':
@@ -365,14 +547,96 @@ export class RealRunDriver {
     }
   }
 
-  private async runOne(runId: string, adapter: GateAdapter, state: RunArtifacts) {
-    const files = (state.packets ?? []).flatMap((p) => p.task.files);
+  /**
+   * Commit one task's work with provenance trailers (§13.1). A task that wrote
+   * nothing commits nothing — an empty commit would put a claim in the history
+   * that no diff supports.
+   */
+  private async commitTask(
+    runId: string,
+    tree: WorktreeManager,
+    packet: WorkPacket,
+    state: RunArtifacts,
+  ): Promise<string | undefined> {
+    const handle = this.store.get(runId);
+    if (!handle) return undefined;
+    // A task that wrote nothing commits nothing: an empty commit would put a
+    // claim in the history that no diff supports.
+    if (!(await tree.isDirty(state.worktree!))) return undefined;
+
+    return tree.commit(state.worktree!, `${handle.run.ticket.key}: ${packet.task.title}`, {
+      'AgentFlow-Run': handle.run.id,
+      'AgentFlow-Task': packet.task.id,
+      'AgentFlow-Workflow': handle.run.workflow,
+    });
+  }
+
+
+  private writeText(runId: string, name: string, body: string): string {
+    const dir = join(this.paths.runsDir, runId, 'artifacts');
+    const path = join(dir, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path, body, 'utf8');
+    return path;
+  }
+
+  /**
+   * Was this gate already failing on the untouched base (§5.3)?
+   *
+   * The baseline run exists precisely so a run does not inherit blame for a
+   * broken `main` and burn its repair budget chasing failures it did not
+   * cause. Recording the baseline and then still blocking on it would make the
+   * check decorative. The failure is still reported as a `gate_result`, so it
+   * reaches the human and the PR package either way — it just does not stop
+   * the run.
+   */
+  private wasRedAtBaseline(runId: string, gate: string): boolean {
+    const red = this.artifacts.get(runId)?.baselineFailures?.includes(gate) ?? false;
+    if (red) {
+      const handle = this.store.get(runId);
+      if (handle) {
+        this.store.emitEvent(handle, {
+          t: 'log', level: 'warn',
+          message: `${gate} is red, but it was already red on the base — not counted against this run`,
+        });
+      }
+    }
+    return red;
+  }
+
+  /**
+   * The required gates that can actually run here, cheapest first.
+   *
+   * Adapters whose `detect()` is false are filtered out rather than run:
+   * §5.3's "warn and continue" means the gate does not apply to this repo, and
+   * running it anyway produces a spurious red that the baseline then has to
+   * excuse — noise standing in for a check that was never possible.
+   */
+  private runnableGates(required: readonly string[], worktree: string): GateAdapter[] {
+    const repo = { root: worktree, files: [] };
+    return this.gates.resolve(required).adapters.filter((a) => a.detect(repo));
+  }
+
+  private async runGateIn(
+    runId: string,
+    adapter: GateAdapter,
+    worktree: string,
+    files: readonly string[],
+    coverageThreshold?: number,
+  ) {
+    const repo = {
+      root: worktree,
+      files: [...files],
+      ...(coverageThreshold !== undefined ? { thresholds: { coverage: coverageThreshold } } : {}),
+    };
     return runGate(adapter, {
-      repo: { root: state.worktree!, files },
-      scope: adapter.affectedBy?.(files) ?? { files },
+      repo,
+      scope: adapter.affectedBy?.([...files]) ?? { files: [...files] },
       logDir: join(this.paths.runsDir, runId, 'logs'),
     });
   }
+
+
 
   private emitTurn(runId: string, turn: AgentTurn): void {
     const handle = this.store.get(runId);

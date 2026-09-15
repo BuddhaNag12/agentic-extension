@@ -4,8 +4,9 @@ A ticket goes in. A reviewed, tested, green pull request comes out — with a
 human approving at three defined points and able to interrupt at any point.
 
 Implementation of [agentflow-architecture.md](agentflow-architecture.md).
-**Current state: the pipeline runs the §5.1 seven phases for real, from intake
-through build. `ship` prepares nothing yet, and there is no Work Inbox.**
+**Current state: a ticket description becomes a rebased, gate-verified branch
+with a PR package ready to push. The repair loop, the cold reviewer and the Work
+Inbox are the remaining gaps.**
 
 > **The model proposes; the runner decides.** No phase advances because an agent
 > said it was finished. A phase advances because a gate — a deterministic
@@ -30,6 +31,12 @@ Intake ─▶ Preflight ─▶ Context ─▶ Plan ─▶ Build ─▶ Review �
 | `build` | `implement`, `verify`, (`repair`) | — |
 | `review` | `auto_review`, `triage_findings`, (`human_review`) | **G3** |
 | `ship` | `rebase`, and `push`/`publish`/`notify` only with `autoPush` | hands off |
+
+`build` cycles per task in DAG order — checkpoint, implement, that task's
+declared gates, **commit on green** — so history stays bisectable and a failing
+task leaves the green ones landed. `verify` is then the whole-tree
+`ALL_GATES_GREEN` pass, because two tasks can each pass their own gates and
+still break each other.
 
 `repair` and `human_review` are entered by a trigger — a red gate, a parked
 gate — never by falling off the end of the previous step. Gates hang off a step
@@ -59,9 +66,12 @@ exercised deterministically and for free.
   W1–W8 validator, inheritance, and the five built-ins expressed as definitions
 - **Git worktrees** (§4.1) — one isolated tree per run in a sibling directory,
   base-ref resolution, checkpoints, commit trailers, and the §15.2 resume guard
-- **Gates** (§14.2) — the adapter interface, a Node/TypeScript adapter set with
-  real parsers, and a runner that fails fast and refuses to call a gate green
-  when the tool never ran
+- **Gates** (§14.2) — the adapter interface, a Node/TypeScript adapter set
+  (compile, lint, unit, coverage, secretscan) with real parsers, and a runner
+  that fails fast and refuses to call a gate green when the tool never ran.
+  A required gate with **no adapter** blocks the run at preflight; one whose
+  adapter does not apply to this repo warns; one already red on the base is
+  reported but not counted against the run (§5.3)
 - **Guardrails** (§9.4, §11.3) — the `PreToolUse` policy: worktree escape,
   path allow/denylists, credential-shape detection, bash policy, and the seven
   §11.3 anti-patterns that let a repair loop fake success
@@ -85,15 +95,24 @@ exercised deterministically and for free.
 - **Decompose** (§5.5) — mechanical, no model: the plan compiles into
   self-contained work packets with per-task path allowlists and touch budgets
 - **Implement** (§5.6) — the first step that writes, in a real worktree, with
-  the guardrails binding through `PreToolUse`
+  the guardrails binding through `PreToolUse`, a checkpoint before each task
+  edits, and a commit per task once its gates pass
+- **Ship** (§5.8) — rebase onto the base, re-run the ladder **on the rebased
+  tree** because the earlier green was a different tree, and assemble
+  `artifacts/pr-package.md`. A conflict aborts the rebase and blocks rather
+  than being resolved (§13.3). Nothing is pushed: the package is a hand-off
+  card with the branch, commit list, diffstat, gate summary, the acceptance
+  criteria as a manual checklist, and the `git push` to run yourself
 
-- 287 tests: state machine, replay (including a property test), the schema
+- 332 tests: state machine, replay (including a property test), the schema
   2.0.0 log migration, failure signatures, concurrency, workflow validation,
-  real git worktrees, real gate execution, and a daemon integration test over
-  the real socket
+  real git worktrees and rebases, real gate execution, a ship integration test
+  that asserts nothing reaches `origin`, and a daemon integration test over the
+  real socket
 
-Not yet real: the repair loop (§11), the cold reviewer (§5.7), ship (§5.8), the
-Work Inbox (§6), the PR review pipeline (§9), and Jira/Figma/GitHub.
+Not yet real: the repair loop (§11) — a red gate blocks rather than retrying —
+the cold reviewer (§5.7), the Work Inbox (§6), the PR review pipeline (§7), and
+Jira/Figma/GitHub.
 
 ## Layout
 
@@ -127,7 +146,7 @@ Everything else is a separate script, each independently runnable:
 |---|---|
 | `npm run build` | Compiles all packages, then bundles the extension and the daemon |
 | `npm run typecheck` | `tsc -b` across every package; no emit |
-| `npm test` | 287 tests (`npm run test:watch` to iterate) |
+| `npm test` | 332 tests (`npm run test:watch` to iterate) |
 | `npm run package` | Produces `agentflow.vsix` |
 | `npm run clean` | Removes `dist/` and build info |
 
@@ -150,8 +169,8 @@ export AGENTFLOW_FAKE_TIME_SCALE=0.1
 The extension drives the **real** steps: starting a run creates a git worktree
 in preflight, records the baseline gate result, then runs harvest, draft_spec,
 draft_plan, decompose, implement and verify in it, parking at the three human
-gates. `ship` is not implemented, so a run stops with its branch ready rather
-than assembling a PR package.
+gates. After G3 it rebases, re-runs the ladder and writes
+`.agentflow/runs/<id>/artifacts/pr-package.md` — then stops. **You push.**
 
 Runs bill to your Claude Code account — budget roughly $3 for a small ticket.
 To drive the simulated pipeline instead (free, deterministic, for UI work):
@@ -163,8 +182,27 @@ export AGENTFLOW_SIMULATE=1
 To install it into your own VS Code instead of the dev host:
 
 ```bash
-npm run package && code --install-extension agentflow.vsix
+npm run package && code --install-extension agentflow.vsix --force
 ```
+
+The packaged `.vsix` carries its own copy of the Agent SDK under
+`dist/vendor/`, because `vsce --no-dependencies` ships no `node_modules` and the
+SDK cannot be bundled — it reads `import.meta.url` to find its own files. What
+it does **not** carry is the SDK's platform-specific native CLI (192 MB, and it
+would make the `.vsix` platform-specific): the run drives the `claude` on your
+`PATH` instead, so Claude Code must be installed. `preflight` checks for it and
+blocks with a clear message if it is missing.
+
+| Variable | Use |
+|---|---|
+| `AGENTFLOW_CLAUDE_PATH` | Point at a `claude` binary that is not on `PATH` |
+| `AGENTFLOW_SDK_PATH` | Point at an `sdk.mjs` directly, e.g. a local SDK checkout |
+
+The CLI must also be **signed in** — `claude auth login`. Being signed into the
+Claude Code app is not the same thing: the app holds its own session, and a
+spawned CLI uses its own stored credential. `preflight` checks this and blocks
+with the fix rather than letting it surface as an authentication error inside
+`harvest`.
 
 The extension publishes as **`buddhanag12.agentflow`**. The publisher matters:
 `AgentFlow` is an unrelated extension already on the Marketplace, and Marketplace
@@ -215,7 +253,8 @@ const tree = await new WorktreeManager(process.cwd()).create({
 - Split semaphores (§4.3) — [scheduler.ts](packages/orchestrator/src/scheduler.ts)
 - Question and approval broker (§9) — [hitl.ts](packages/orchestrator/src/hitl.ts)
 - Workflow schema and W1–W8 validator (§C) — [validate.ts](packages/core/src/workflow/validate.ts), [loader.ts](packages/core/src/workflow/loader.ts)
-- Worktrees (§4.1, §15.2) — [worktree.ts](packages/orchestrator/src/git/worktree.ts)
+- Worktrees, commits and rebase (§4.1, §13, §15.2) — [worktree.ts](packages/orchestrator/src/git/worktree.ts)
+- The PR hand-off package (§5.8) — [prPackage.ts](packages/orchestrator/src/runs/prPackage.ts)
 - Gate ladder and parsers (§14) — [runner.ts](packages/gates/src/runner.ts), [node.ts](packages/gates/src/adapters/node.ts)
 - Tool permissions and anti-patterns (§9.4, §11.3) — [guardrails/](packages/agent-runtime/src/guardrails/)
 - Replay model and provider seam (§14.7, §19.3) — [replay.ts](packages/agent-runtime/src/providers/replay.ts)
@@ -226,21 +265,24 @@ Decisions taken while building this, including the six open questions from
 
 ## Next
 
-Two candidates, in the roadmap's order:
+The deliver slice now runs end to end. Two candidates:
 
-- **Finish the deliver slice (§20 M2):** `ship` — rebase, re-run the ladder on
-  the rebased tree, assemble `artifacts/pr-package.md`, and park at handoff. The
-  push stays a human action (§5.8). That reaches the exit criterion that
-  matters: **one real, simple ticket becomes a real PR.**
+- **The single-pass reviewer (§5.7, the rest of §20 M2).** `auto_review` returns
+  zero findings honestly rather than faking a pass, so G3 currently shows the
+  diff and gate evidence and nothing else. M2 asks for one pass, not §5.7's
+  four.
 - **The Work Inbox (§20 M1):** Jira and GitHub auth via `SecretStorage`, saved
   queries, the three-group TreeView, readiness chips. Independently shippable,
   and it is what makes the tool something to open every morning.
 
+The repair loop (§11, M3) is the other large gap: a red gate blocks the run
+instead of converging. The checkpoint it needs to rewind to is now recorded
+before every task, which was the missing prerequisite.
+
 `harvest`, `draft_spec` and `draft_plan` run for real end to end — verified
 against this repository for $1.54 a run, producing a three-task DAG with zero
-gate violations. `implement` writes into a real git worktree and its declared
-gate was run against the result; it passed. A Jira adapter can wait: a pasted
-ticket description exercises everything.
+gate violations. A Jira adapter can wait: a pasted ticket description exercises
+everything.
 
 Credentials: the Agent SDK drives the Claude Code CLI, which resolves its own
 auth, so a developer already signed into Claude Code needs no API key. Runs bill

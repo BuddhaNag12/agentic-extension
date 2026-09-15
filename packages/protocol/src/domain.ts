@@ -85,6 +85,8 @@ export type HumanGate = z.infer<typeof HumanGate>;
 
 export const ArtifactKind = z.enum([
   'context', 'spec', 'plan', 'taskgraph', 'review', 'testreport', 'diff',
+  /** The §5.8 hand-off package: title, body, commit list, how to verify. */
+  'prpackage',
 ]);
 export type ArtifactKind = z.infer<typeof ArtifactKind>;
 

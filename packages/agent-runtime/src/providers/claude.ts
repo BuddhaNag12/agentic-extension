@@ -4,6 +4,7 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk' with { 'resolution-mode': 'import' };
 import { MODEL_CATALOGUE } from '@agentflow/protocol';
 import { checkToolCall } from '../guardrails/index.js';
+import { claudeCliPath, SDK_PATH_ENV, sdkSpecifier } from './resolve.js';
 import type {
   AgentProvider, AgentSession, AgentTurn, PermissionHook, ProviderCapabilities, SessionOptions,
 } from './types.js';
@@ -14,11 +15,31 @@ let sdk: SdkModule | undefined;
 /**
  * The Agent SDK is ESM-only and these packages are CommonJS, so a plain
  * `await import(...)` would be downlevelled to `require()` and fail at runtime.
- * Keeping the specifier opaque preserves a real dynamic import; the type import
+ * Keeping the import opaque preserves a real dynamic import; the type import
  * above is erased and costs nothing.
+ *
+ * The specifier is computed rather than literal, because an opaque literal is
+ * also invisible to **esbuild** — it survives into the bundle as a bare
+ * specifier that nothing can resolve from a packaged extension with no
+ * `node_modules`. `sdkSpecifier()` prefers the vendored copy the build stages
+ * next to the bundle.
  */
 async function loadSdk(): Promise<SdkModule> {
-  sdk ??= await (Function('return import("@anthropic-ai/claude-agent-sdk")')() as Promise<SdkModule>);
+  if (sdk) return sdk;
+  const specifier = sdkSpecifier();
+  try {
+    sdk = await (Function('u', 'return import(u)')(specifier) as Promise<SdkModule>);
+  } catch (err) {
+    // The bare-specifier fallback failing means no `node_modules` is in scope,
+    // which is a packaging problem — and the module resolver's own message
+    // says nothing about how to fix it.
+    throw new Error(
+      `could not load the Claude Agent SDK from "${specifier}". ` +
+      'A packaged extension carries its own copy under dist/vendor; a checkout ' +
+      `needs \`npm install\`. Set ${SDK_PATH_ENV} to point at sdk.mjs directly. ` +
+      `(${err instanceof Error ? err.message : String(err)})`,
+    );
+  }
   return sdk;
 }
 
@@ -116,6 +137,15 @@ class ClaudeSession implements AgentSession {
     const resume = this.opts.resume ?? this.sessionId;
     if (resume) options.resume = resume;
     if (this.opts.fork !== undefined) options.forkSession = this.opts.fork;
+
+    // Drive the developer's own `claude`. Left unset, the SDK resolves a
+    // platform-specific native CLI from its optional dependencies — 192 MB for
+    // one architecture, which a packaged extension can neither carry nor stay
+    // platform-neutral while carrying. Undefined means "you find it", which is
+    // right for a checkout that installed the optional dependency.
+    const cli = claudeCliPath();
+    if (cli) options.pathToClaudeCodeExecutable = cli;
+
     return options;
   }
 

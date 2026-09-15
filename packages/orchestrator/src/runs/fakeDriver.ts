@@ -116,7 +116,15 @@ const STEP_SCRIPT: Partial<Record<Step, Beat[]>> = {
   rebase: [
     { after: 300, emit: (c) => c.tool('git.rebase', 'rebased onto origin/main, no conflicts') },
     { after: 400, emit: (c) => gate(c, 'unit', true, 4_100) },
-    { after: 300, emit: (c) => c.say('PR package written to artifacts/pr-package.md — ready for you to push') },
+    {
+      after: 300,
+      emit: (c) => {
+        c.store.emitEvent(c.store.get(c.runId)!, {
+          t: 'artifact_written', kind: 'prpackage', version: 1, path: 'artifacts/pr-package.md',
+        });
+        c.say('ready to push: 3 commit(s) over origin/main. PR body in artifacts/pr-package.md');
+      },
+    },
   ],
 };
 

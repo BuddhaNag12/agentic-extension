@@ -125,3 +125,26 @@ function extractJson(text: string): string {
   const end = text.lastIndexOf('}');
   return start >= 0 && end > start ? text.slice(start, end + 1) : text;
 }
+
+/**
+ * Vitest reports a threshold miss on stderr, one line per uncovered metric:
+ * `ERROR: Coverage for lines (45.2%) does not meet global threshold (80%)`.
+ *
+ * Parsed rather than left to the exit code alone because the exit code cannot
+ * distinguish "coverage too low" from "the test run itself failed", and those
+ * want different fixes.
+ */
+export function parseCoverage(stdout: string, stderr: string): Failure[] {
+  const failures: Failure[] = [];
+  const pattern = /Coverage for (\w+) \(([\d.]+)%\) does not meet (?:global )?threshold \(([\d.]+)%\)/g;
+  for (const text of [stderr, stdout]) {
+    for (const m of text.matchAll(pattern)) {
+      failures.push({
+        rule: `coverage:${m[1]}`,
+        message: `${m[1]} coverage is ${m[2]}%, below the required ${m[3]}%`,
+      });
+    }
+    if (failures.length > 0) break;
+  }
+  return failures;
+}

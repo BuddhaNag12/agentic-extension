@@ -442,3 +442,226 @@ running and moved it off its first step. With a step vocabulary that means
 are, and emits `run_step` for the step the run is already on. It also gets the
 `status_changed` transition into the log, which `advance` was producing as a
 side effect of something else.
+
+## Decisions made wiring commits and ship
+
+### D38 — The build phase commits per task, and the task cycle lives in the driver
+
+Nothing in the pipeline committed. `WorktreeManager.checkpoint`, `restore` and
+`commit` had been built and tested since M1's foundation and were never called,
+so three things were quietly untrue at once: §5.6's per-task commits were not
+happening, §11.2's rewind had no checkpoint to rewind *to* — the repair loop
+could only ever go forwards — and a finished run left a dirty worktree while the
+README claimed "the branch is ready."
+
+Wiring the commit exposed an ordering bug in the first attempt. `implement`
+looped every task and only then did `verify` run the gates, so a per-task commit
+would have swept the *next* task's files into the previous task's commit, and
+each task's gates would have read a tree containing half-finished work from
+tasks after it. Bisectable history is the whole reason the commit is per task,
+and that shape destroys it.
+
+§5.6 already says the answer — "cycling per task in DAG order" — so the cycle is
+now: checkpoint, implement, that task's declared gates, commit on green. A red
+gate reports `gate_failed` before any commit, so a failing task leaves the
+green ones landed and nothing else.
+
+The cycle lives in the **driver**, not the state machine. Expressing it in the
+FSM would need the task list in `MachineState`, and the machine does not know
+about tasks. `STEP_ORDER`'s `[implement, verify]` stays the phase's shape for
+the board, and `verify` is the whole-tree `ALL_GATES_GREEN` check — two tasks
+can each pass their own gates and still break each other, so the tree gets its
+own pass. Revisit if the repair loop needs to resume mid-task across a restart.
+
+### D39 — A rebase conflict aborts, and a dirty tree is refused before it starts
+
+§13.3 forbids auto-resolution, and the reason is sharper at ship time than
+anywhere else: a machine-resolved conflict is a silent semantic change to code
+a human already approved at G3.
+
+Two things beyond reporting it. The rebase is **aborted**, because a tree left
+mid-rebase is a state nothing else in the system knows how to read — the resume
+guard, the gate runner and `changedFiles` would all be looking at a detached
+mess. And a dirty tree is refused *before* the rebase runs rather than failing
+halfway through one; by ship time everything should be committed, so anything
+uncommitted is unexplained and worth stopping for.
+
+`git`'s exit code decides all of this. The first version inferred failure from
+stderr text, which reads a passing command as failing the moment git changes its
+wording, so `GitResult` now carries `exitCode`.
+
+### D40 — Ship succeeds at hand-off rather than parking in `waiting_human`
+
+§5.8 says the run "parks in `waiting_human` with a *Ready to push* card". It
+reaches `succeeded` instead, with the PR package written to
+`artifacts/pr-package.md` and recorded as an artifact.
+
+The reason is that `waiting_human` is, everywhere else in the system, a run with
+a *decidable* pending item — and D-nothing-in-particular already established
+that an approval sitting in the inbox with nothing behind it produces an error
+rather than an outcome when clicked. A hand-off has nothing to decide: the work
+is done, and pushing is the human's action taken outside the tool. Adding a
+fourth click to acknowledge it is also uncomfortably close to the pre-ship
+confirmation that was proposed and withdrawn as "quite lazy".
+
+What §5.8 actually wanted from `waiting_human` — the run survives a restart and
+releases its slot — a `succeeded` run does too. The only difference is which
+group it sits under in the tree.
+
+*Reversing it later:* give the broker a non-approval `handoff` pending kind and
+park on it. That is additive; nothing here forecloses it.
+
+### D41 — The PR title comes from the ticket, the body from the spec
+
+The first version titled the PR with the first sentence of `spec.problem`, which
+produced `FWERP-2922: The run detail view has no way to see which commands a run
+actually e…`. A problem statement says what is wrong; a PR title says what the
+change does, and `ticket.summary` is already a human's name for the work.
+
+The body keeps the spec, because that is where the spec earns its place: the
+"how to verify manually" section hands over the acceptance criteria in the
+ticket's own words. Gate output proves the code does what the tests say; it
+cannot prove the tests say the right thing, and that gap is exactly what the
+reviewer is for. A package with no gate results says so in as many words —
+"No gate ran, which is not a pass. Do not merge this." — rather than rendering
+an empty table that reads like a clean bill of health.
+
+## Decisions made making the packaged extension actually run
+
+### D42 — The SDK is vendored beside the bundle, and drives the developer's own CLI
+
+An installed build failed on activation with `Cannot find package
+'@anthropic-ai/claude-agent-sdk' imported from .../dist/orchestrator.js`. It had
+never failed under F5, and the reason it had not is the interesting part: the
+Extension Development Host runs against the *workspace*, which has a
+`node_modules`, so a bare specifier resolved. Installed into
+`~/.vscode/extensions/...`, nothing resolves it — `vsce --no-dependencies` ships
+no `node_modules` at all.
+
+The cause is D23's own fix biting back. The specifier is wrapped in
+`Function('return import("…")')` so TypeScript cannot downlevel it to
+`require()` — and a string inside a `Function` constructor is opaque to
+**esbuild** too. So it was neither bundled nor resolvable: it survived verbatim
+into the output as a bare import against a directory with no dependencies.
+Worth remembering as a class of bug: hiding an import from the compiler hides
+it from the bundler, and the two failures look nothing alike.
+
+Bundling it was not an option. `sdk.mjs` reads `import.meta.url` to locate a
+**platform-specific native CLI** from its `optionalDependencies`, and bundling
+relocates `import.meta.url`. So the SDK is staged verbatim into
+`dist/vendor/@anthropic-ai/claude-agent-sdk/` and imported by absolute file URL;
+`sdkSpecifier()` falls back to the bare specifier so a checkout and
+`agent-runtime`-as-a-library keep working unchanged.
+
+Only `sdk.mjs` and its metadata get shipped — 2.1 MB, taking the `.vsix` from
+512 KB to 945 KB. Two things made that possible:
+
+- `sdk.mjs` imports **nothing but node builtins**. The `peerDependencies` on
+  `@anthropic-ai/sdk`, `@modelcontextprotocol/sdk` and `zod` are types and
+  optional APIs, not runtime requirements, and `bridge.mjs` / `browser-sdk.js`
+  are separate entry points this never touches.
+- The native CLI is **not shipped**. It is 192 MB for one architecture, which
+  would also make the `.vsix` platform-specific. Instead `pathToClaudeCodeExecutable`
+  is set to the developer's own `claude` from `PATH` — which the SDK's own error
+  message names as the supported alternative, and which is consistent with the
+  existing stance that being signed into Claude Code is the credential story.
+
+Verified from an extracted `.vsix` with zero `node_modules` on disk: the module
+loads, and the SDK spawns `/opt/homebrew/bin/claude` rather than reporting a
+missing native binary.
+
+### D43 — Preflight checks the CLI is present *and* signed in
+
+`check_auth` was a no-op. A missing or unauthenticated `claude` therefore
+surfaced three steps later as `harvest failed: Claude Code returned an error
+result: Failed to authenticate` — which reads like a problem with the run, and
+is not. That is the precise failure §5.3 exists to prevent, since discovering an
+environmental problem at minute 25 wastes both the money and the trust.
+
+It now resolves the CLI, then asks it `auth status --json` (0.2–0.6 s, cheap
+enough to pay every run) and blocks with the command that fixes it. The CLI
+exits 1 when signed out and still prints the JSON saying so, so a non-zero exit
+is the answer rather than an error.
+
+An **indeterminate** result deliberately does not block. An older CLI without
+`auth status`, or a spawn that times out, is not evidence of being signed out,
+and refusing to start on a check that could not run would break a working setup
+to guard against a broken one. Only a definite `loggedIn: false` blocks. This is
+the opposite of D16's rule for gates, and the asymmetry is the point: a gate
+decides whether code is correct, where a false green is the worst outcome; this
+decides whether to *attempt* a run, where a false block is.
+
+`loadSdk()` got the same treatment for a different reason: a module-resolution
+error says nothing about packaging, so the failure is wrapped with where a
+packaged build keeps its copy, that a checkout needs `npm install`, and the
+override variable.
+
+*What this does not do:* refresh anything. A process spawned from inside a
+Claude Code session inherits `CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH` and friends,
+which tell the spawned CLI that its host will refresh OAuth for it through
+callbacks this provider does not supply. That was the first suspected cause of
+the failure above and it was **wrong** — stripping those variables changed
+nothing, because the CLI's stored credential was simply absent
+(`authMethod: "none"`). Worth recording so the next person does not re-run the
+same experiment.
+
+## Decisions made closing the false-green in the gate ladder
+
+### D44 — A declared gate with no adapter blocks; one that does not apply warns
+
+Every built-in workflow required `coverage`, `bug` required `repro_test` and
+`refactor` required `behaviour_preservation`. None of the three had an adapter.
+`GateRegistry.resolve()` returned them in `missing`, and **no caller ever read
+`missing`** — so they were silently dropped. A `bug` run could report
+`ALL_GATES_GREEN` having never run the reproduction check the profile exists
+for.
+
+This is D16 one level up. D16 says a gate that could not *run* is a failure;
+this is a gate that was never a gate at all, and it failed in the quietest
+possible way: a shorter list of gate results that nothing compared against what
+was asked for.
+
+§5.3 already separates the two cases that `resolve()` conflated, and the
+distinction decides whether a run may start:
+
+- **No adapter registered** — *the system* cannot run what the workflow
+  declares. Preflight blocks, naming the gate. `verify` re-checks, because
+  `ALL_GATES_GREEN` is a claim about the required set and cannot be made
+  without one of them.
+- **Adapter exists but `detect()` is false** — *this repo* does not support it.
+  §5.3 says warn and continue, so the run proceeds with the absence recorded as
+  a warning rather than inferred later from a shorter list.
+
+Three consequences:
+
+- A real `coverage` adapter now exists, so the id resolves. It requires a
+  coverage *provider*, not just vitest: `--coverage` without one reports
+  nothing and exits zero, which would make an unmeasured repo look covered.
+  The workflow's `coverageThreshold` reaches it through a new optional
+  `RepoContext.thresholds` — a coverage gate without a threshold is not a gate.
+- `repro_test` is **removed** from `bug`. PLAN_VALID's rule P6 already rejects
+  a bug plan whose first task is not a failing reproduction test, which is
+  where the requirement is actually enforceable. Declaring it as a gate as well
+  was a duplicate that named nothing.
+- `behaviour_preservation` **stays declared** on `refactor`, which now refuses
+  to run. That is the honest state: the gate that makes a refactor a refactor
+  rather than a rewrite does not exist yet, and blocking says so where silently
+  skipping it did not.
+
+### D45 — A gate red on the base does not block the run
+
+`baseline_gates` recorded `baselineFailures` and nothing ever read it, so a
+pre-existing red still stopped the run — the run inherited blame for a broken
+`main` and would have spent its whole repair budget chasing failures it did not
+cause, which is the exact outcome §5.3's baseline run exists to prevent.
+
+The three places that decide on a gate result — the per-task gates, the
+whole-tree ladder, and ship's re-run — now exclude a gate that was already red
+at baseline. It is still emitted as a `gate_result` and still reaches the human
+and the PR package; it just does not stop the run.
+
+This matters immediately rather than theoretically: `secretscan.detect()` is
+unconditionally true by design ("a secret scan is not something a repo opts
+into"), so on a machine without `gitleaks` it fails — correctly, per D16 — and
+before this every run in such a repo would have blocked at `verify` with the
+repair loop unimplemented. The baseline run sees the same red and excludes it.

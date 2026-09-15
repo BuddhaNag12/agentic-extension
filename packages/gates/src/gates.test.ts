@@ -8,7 +8,10 @@ import { runGate, runLadder } from './runner.js';
 import {
   fallbackFailure, parseEslintJson, parseGitleaksJson, parseTsc, parseVitestJson,
 } from './parsers/typescript.js';
-import { NODE_ADAPTERS, compileGate, lintGate, unitGate } from './adapters/node.js';
+import {
+  DEFAULT_COVERAGE_THRESHOLD, NODE_ADAPTERS, compileGate, coverageGate, lintGate, unitGate,
+} from './adapters/node.js';
+import { BUILT_IN_WORKFLOWS } from '@agentflow/core';
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'agentflow-gates-')); });
@@ -145,7 +148,8 @@ describe('registry', () => {
   });
 
   it('registers every Node adapter', () => {
-    expect(NODE_ADAPTERS.map((a) => a.id).sort()).toEqual(['compile', 'lint', 'secretscan', 'unit']);
+    expect(NODE_ADAPTERS.map((a) => a.id).sort())
+      .toEqual(['compile', 'coverage', 'lint', 'secretscan', 'unit']);
   });
 });
 
@@ -262,4 +266,63 @@ describe('a real repository', () => {
     expect(red.failures[0]).toMatchObject({ rule: 'TS2322' });
     expect(red.failures[0]?.file).toContain('bad.ts');
   }, 60_000);
+});
+
+describe('the coverage gate (§14.1)', () => {
+  it('needs a provider, not just vitest — bare --coverage measures nothing', () => {
+    mkdirSync(join(dir, 'node_modules', 'vitest'), { recursive: true });
+    expect(coverageGate.detect({ root: dir, files: [] })).toBe(false);
+
+    mkdirSync(join(dir, 'node_modules', '@vitest', 'coverage-v8'), { recursive: true });
+    expect(coverageGate.detect({ root: dir, files: [] })).toBe(true);
+  });
+
+  it('passes the workflow threshold through as a percentage', () => {
+    const cmd = coverageGate.command({ files: [] }, { root: dir, files: [], thresholds: { coverage: 0.65 } });
+    expect(cmd.args).toContain('--coverage.thresholds.lines=65');
+    expect(cmd.args).toContain('--coverage.thresholds.statements=65');
+  });
+
+  it('falls back to a default rather than an unbounded run', () => {
+    const cmd = coverageGate.command({ files: [] }, { root: dir, files: [] });
+    expect(cmd.args).toContain(`--coverage.thresholds.lines=${DEFAULT_COVERAGE_THRESHOLD * 100}`);
+  });
+
+  it('reports which metric missed, not just that something did', () => {
+    const stderr = 'ERROR: Coverage for lines (45.2%) does not meet global threshold (80%)';
+    const failures = coverageGate.parse('', stderr, 1);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.rule).toBe('coverage:lines');
+    expect(failures[0]!.message).toContain('45.2%');
+    expect(failures[0]!.message).toContain('80%');
+  });
+
+  it('treats a broken run as a failure, never as covered enough', () => {
+    // No threshold message and a non-zero exit means the run itself died.
+    const failures = coverageGate.parse('', 'Cannot find module', 1);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.message).toContain('Cannot find module');
+  });
+});
+
+describe('a required gate with no adapter', () => {
+  it('is reported as missing rather than quietly dropped', () => {
+    // This is the bug: `resolve` returned it in `missing`, every caller read
+    // only `adapters`, and a run reported ALL_GATES_GREEN over a gate that
+    // never existed.
+    const { adapters, missing } = new GateRegistry().resolve([
+      'compile', 'behaviour_preservation', 'repro_test',
+    ]);
+    expect(missing).toEqual(['behaviour_preservation', 'repro_test']);
+    expect(adapters.map((a) => a.id)).toEqual(['compile']);
+  });
+
+  it('now covers every gate the built-in workflows declare, except the unimplemented one', () => {
+    const registry = new GateRegistry();
+    for (const wf of BUILT_IN_WORKFLOWS) {
+      const { missing } = registry.resolve(wf.pipeline.gates.required);
+      const expected = wf.name === 'refactor' ? ['behaviour_preservation'] : [];
+      expect([wf.name, missing]).toEqual([wf.name, expected]);
+    }
+  });
 });

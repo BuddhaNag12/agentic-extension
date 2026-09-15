@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { GateAdapter } from '../adapter.js';
 import {
-  fallbackFailure, parseEslintJson, parseGitleaksJson, parseTsc, parseVitestJson,
+  fallbackFailure, parseCoverage, parseEslintJson, parseGitleaksJson, parseTsc, parseVitestJson,
 } from '../parsers/typescript.js';
 
 /**
@@ -79,6 +79,44 @@ export const unitGate: GateAdapter = {
   estimatedMs: () => 20_000,
 };
 
+/** Coverage providers vitest can drive. Without one, `--coverage` is inert. */
+const COVERAGE_PROVIDERS = ['@vitest/coverage-v8', '@vitest/coverage-istanbul'];
+
+export const DEFAULT_COVERAGE_THRESHOLD = 0.8;
+
+export const coverageGate: GateAdapter = {
+  id: 'coverage',
+  level: 4,
+  blocking: true,
+  // Requires a provider, not just vitest: `--coverage` without one reports
+  // nothing and exits zero, which would make an unmeasured repo look covered.
+  detect: (repo) =>
+    hasLocal(repo.root, 'vitest') && COVERAGE_PROVIDERS.some((p) => hasLocal(repo.root, p)),
+  command: (_scope, repo) => {
+    const ratio = repo.thresholds?.coverage ?? DEFAULT_COVERAGE_THRESHOLD;
+    // Vitest takes percentages; the workflow stores a ratio.
+    const percent = Math.round(ratio * 100);
+    return {
+      cmd: localBin(repo.root, 'vitest'),
+      args: [
+        'run', '--coverage',
+        '--coverage.reporter=text-summary',
+        `--coverage.thresholds.lines=${percent}`,
+        `--coverage.thresholds.statements=${percent}`,
+      ],
+      cwd: repo.root,
+    };
+  },
+  parse: (stdout, stderr, exitCode) => {
+    const failures = parseCoverage(stdout, stderr);
+    if (failures.length > 0) return failures;
+    // A non-zero exit with no threshold message means the run itself broke —
+    // a failing test, a missing provider — and that is not "covered enough".
+    return exitCode === 0 ? [] : [fallbackFailure('coverage', exitCode, stderr)];
+  },
+  estimatedMs: () => 35_000,
+};
+
 export const secretScanGate: GateAdapter = {
   id: 'secretscan',
   level: 8,
@@ -100,4 +138,6 @@ export const secretScanGate: GateAdapter = {
   estimatedMs: () => 2_000,
 };
 
-export const NODE_ADAPTERS: GateAdapter[] = [compileGate, lintGate, unitGate, secretScanGate];
+export const NODE_ADAPTERS: GateAdapter[] = [
+  compileGate, lintGate, unitGate, coverageGate, secretScanGate,
+];

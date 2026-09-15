@@ -9,10 +9,11 @@ import { AgentRole, Effort, ModelAlias, ThinkingMode } from './models.js';
  * no privileged built-ins.
  */
 
-/** 2.0.0 moved `pipeline.skip` onto §5.1's seven phases and added
- *  `skipSteps`. Built-in definitions on disk at an older version are reseeded
+/** 2.0.0 moved `pipeline.skip` onto §5.1's seven phases and added `skipSteps`;
+ *  2.1.0 dropped `repro_test` from `bug`, which PLAN_VALID's rule P6 already
+ *  enforces. Built-in definitions on disk at an older version are reseeded
  *  rather than left to fail validation against a vocabulary they predate. */
-export const WORKFLOW_SCHEMA_VERSION = '2.0.0';
+export const WORKFLOW_SCHEMA_VERSION = '2.1.0';
 
 /** Lowercase slug: it names a file and appears in the RPC contract. */
 export const WorkflowName = z.string().regex(

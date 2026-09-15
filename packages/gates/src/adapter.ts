@@ -11,6 +11,12 @@ import type { Failure, GateId } from '@agentflow/protocol';
 export interface RepoContext {
   root: string;
   files: string[];
+  /**
+   * Per-workflow numbers an adapter needs to build its command. A coverage
+   * gate is only meaningful against a threshold, and the threshold belongs to
+   * the workflow (§21) rather than to the adapter.
+   */
+  thresholds?: { coverage?: number };
 }
 
 export interface Scope {

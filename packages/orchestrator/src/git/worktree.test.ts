@@ -266,3 +266,95 @@ describe('cleanup', () => {
     expect(await manager.list()).toHaveLength(1);
   });
 });
+
+describe('rebase (§5.8, §13.3)', () => {
+  /** Move `main` on in the clone and publish it, as a teammate would. */
+  const advanceBase = (file: string, body: string) => {
+    writeFileSync(join(repo, file), body);
+    run(repo, 'add', '-A');
+    run(repo, 'commit', '-m', `base moved: ${file}`);
+    run(repo, 'push', 'origin', 'main');
+  };
+
+  it('reports nothing to do when the branch is already on top of the base', async () => {
+    const info = await manager.create({ ticketKey: 'PAY-1', baseRef: 'main' });
+    const result = await manager.rebase(info.path, 'main');
+
+    expect(result.ok).toBe(true);
+    expect(result.alreadyCurrent).toBe(true);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it('replays the branch onto a base that moved', async () => {
+    const info = await manager.create({ ticketKey: 'PAY-1', baseRef: 'main' });
+    writeFileSync(join(info.path, 'feature.ts'), 'export const f = 1;\n');
+    await manager.commit(info.path, 'add the feature');
+
+    advanceBase('other.ts', 'export const other = 1;\n');
+
+    const result = await manager.rebase(info.path, 'main');
+    expect(result.ok).toBe(true);
+    expect(result.alreadyCurrent).toBe(false);
+    // The base commit is now an ancestor, and the branch work survived.
+    expect(existsSync(join(info.path, 'other.ts'))).toBe(true);
+    expect(existsSync(join(info.path, 'feature.ts'))).toBe(true);
+  });
+
+  it('aborts on a conflict and names the files, rather than resolving it', async () => {
+    const info = await manager.create({ ticketKey: 'PAY-1', baseRef: 'main' });
+    writeFileSync(join(info.path, 'src.ts'), 'export const x = 2; // ours\n');
+    const ours = await manager.commit(info.path, 'change x to 2');
+
+    advanceBase('src.ts', 'export const x = 3; // theirs\n');
+
+    const result = await manager.rebase(info.path, 'main');
+    expect(result.ok).toBe(false);
+    expect(result.conflicts).toContain('src.ts');
+    expect(result.reason).toMatch(/CONFLICT|could not apply/i);
+
+    // Aborted, not left mid-rebase: the branch is exactly where it was, and a
+    // tree stranded in a rebase is a state nothing else knows how to read.
+    expect(await manager.head(info.path)).toBe(ours);
+    expect(await manager.currentBranch(info.path)).toBe('agentflow/PAY-1');
+    expect(await manager.isDirty(info.path)).toBe(false);
+  });
+
+  it('refuses to rebase a dirty tree instead of failing halfway through one', async () => {
+    const info = await manager.create({ ticketKey: 'PAY-1', baseRef: 'main' });
+    writeFileSync(join(info.path, 'src.ts'), 'export const x = 99;\n');
+
+    const result = await manager.rebase(info.path, 'main');
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/uncommitted/);
+    expect(result.conflicts).toEqual([]);
+  });
+});
+
+describe('the PR hand-off inputs (§5.8)', () => {
+  it('lists only the commits this branch added, newest first', async () => {
+    const info = await manager.create({ ticketKey: 'PAY-1', baseRef: 'main' });
+    writeFileSync(join(info.path, 'a.ts'), 'export const a = 1;\n');
+    await manager.commit(info.path, 'PAY-1: first task');
+    writeFileSync(join(info.path, 'b.ts'), 'export const b = 1;\n');
+    await manager.commit(info.path, 'PAY-1: second task');
+
+    const commits = await manager.commitsSince(info.path, info.baseSha);
+    expect(commits.map((c) => c.subject)).toEqual(['PAY-1: second task', 'PAY-1: first task']);
+    expect(commits[0]!.sha).toHaveLength(40);
+  });
+
+  it('returns no commits for a branch that has not committed anything', async () => {
+    const info = await manager.create({ ticketKey: 'PAY-1', baseRef: 'main' });
+    expect(await manager.commitsSince(info.path, info.baseSha)).toEqual([]);
+  });
+
+  it('summarizes the diff against the base', async () => {
+    const info = await manager.create({ ticketKey: 'PAY-1', baseRef: 'main' });
+    writeFileSync(join(info.path, 'a.ts'), 'export const a = 1;\n');
+    await manager.commit(info.path, 'PAY-1: first task');
+
+    const stat = await manager.diffStat(info.path, info.baseSha);
+    expect(stat).toContain('a.ts');
+    expect(stat).toMatch(/1 file changed/);
+  });
+});
