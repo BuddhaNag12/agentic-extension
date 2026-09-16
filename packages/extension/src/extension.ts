@@ -70,10 +70,39 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('agentflow.answerNext', (node?: InboxNode) => respond(node ?? inbox.first())),
     vscode.commands.registerCommand('agentflow.showLog', () => output.show()),
     vscode.commands.registerCommand('agentflow.restartOrchestrator', async () => {
-      client?.dispose();
+      // A real restart, which means the daemon exits. The old version only
+      // rebuilt the client, which reattached to the same detached daemon and
+      // so restarted nothing — invisible until you wonder why new code had no
+      // effect after reinstalling the extension.
+      const active = (await client?.listRuns().catch(() => undefined))?.runs
+        .filter((r) => r.status === 'running' || r.status === 'waiting_human') ?? [];
+
+      if (active.length > 0) {
+        const keys = active.map((r) => r.ticket.key).join(', ');
+        const yes = await vscode.window.showWarningMessage(
+          `Restarting the orchestrator cancels ${active.length} run(s) in flight: ${keys}. ` +
+          'Their branches and worktrees are kept.',
+          { modal: true },
+          'Restart anyway',
+        );
+        if (yes !== 'Restart anyway') return;
+      }
+
+      const stopped = await client?.shutdownDaemon();
+      if (stopped === false) {
+        // Reconnecting now would silently reattach to the daemon we asked to
+        // leave, which is the bug this command had.
+        log('the orchestrator did not exit; not reconnecting. Kill it and retry.');
+        void vscode.window.showErrorMessage(
+          'AgentFlow: the orchestrator did not exit. See the AgentFlow output channel.',
+        );
+        return;
+      }
+
       client = new OrchestratorClient(workspace.uri.fsPath, daemonEntry, log);
       await client.ensureConnected();
       await vscode.commands.executeCommand('agentflow.refresh');
+      log('orchestrator restarted');
     }),
   );
 

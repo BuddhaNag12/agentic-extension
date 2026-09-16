@@ -818,3 +818,22 @@ discarded the promise with `void`, so a write to a closed socket — a window
 closing mid-broadcast, which is routine — escaped as an unhandled rejection.
 The suite reported it as an error beside passing tests, which is exactly how
 such a thing survives: nothing fails.
+
+### D57 — "Restart Orchestrator" now restarts the orchestrator
+
+The command rebuilt the client and called `ensureConnected()`. The daemon is
+detached and its lockfile still named a live pid, so it reattached to the very
+process it was meant to replace. Nothing failed, which is why it survived for
+this long — the symptom was new code appearing to have no effect after
+reinstalling the extension, which reads as a build problem.
+
+`shutdownDaemon()` sends the `shutdown` RPC that the daemon has answered since
+M0 and that no client ever called, then waits for the lock to clear. Two
+details are the point rather than the plumbing:
+
+- It **returns false** instead of throwing when the lock does not clear, and the
+  caller then refuses to reconnect. Reconnecting on failure is the original bug,
+  and a silent reattach is worse than a visible refusal.
+- It **asks first** when runs are in flight, naming them. `dispose()` leaving
+  the daemon alive is deliberate — a window reload must not kill a run — so a
+  command that genuinely stops it has to be the one that says so.

@@ -170,6 +170,39 @@ export class OrchestratorClient extends EventEmitter {
     this.connection?.dispose();
     this.socket?.destroy();
   }
+
+  /**
+   * Ask the daemon to exit, and wait until it actually has.
+   *
+   * `dispose()` alone only drops this end of the socket — the daemon is
+   * detached and its lockfile still names a live pid, so the next
+   * `ensureConnected()` reattaches to the same process. That is why "Restart
+   * Orchestrator" did not restart anything: it rebuilt the client and
+   * reconnected to the daemon it was meant to replace, which is invisible
+   * until you wonder why new code did not take effect.
+   *
+   * Returns false if the lock has not cleared in time, so the caller can say
+   * so rather than silently reattaching.
+   */
+  async shutdownDaemon(timeoutMs = 5_000): Promise<boolean> {
+    const paths = workspacePaths(this.workspaceRoot);
+    try {
+      await this.ensureConnected();
+      // The daemon exits on a timer after replying, so a dropped connection
+      // here is the request succeeding, not failing.
+      await this.request(Methods.shutdown, {});
+    } catch (err) {
+      this.log(`shutdown request did not complete: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    this.dispose();
+
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!readLiveLock(paths.lockFile)) return true;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return false;
+  }
 }
 
 async function connectWithRetry(endpoint: string, attempts = 20): Promise<Socket> {
