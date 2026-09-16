@@ -333,9 +333,13 @@ export class Orchestrator {
 
   private broadcast(method: string, params: unknown): void {
     for (const c of this.clients) {
-      // A dead client must never break the loop for the live ones.
+      // A dead client must never break the loop for the live ones — and the
+      // failure is asynchronous, so `void` inside a try/catch let the
+      // rejection escape as an unhandled one. A window closing mid-broadcast
+      // is routine, not an error worth surfacing.
       try {
-        void c.sendNotification(method, params);
+        const sent = c.sendNotification(method, params);
+        if (sent instanceof Promise) sent.catch(() => this.detach(c));
       } catch {
         this.detach(c);
       }

@@ -26,7 +26,14 @@ import type { RunStore } from './store.js';
  * work and reports evidence.
  */
 
+/** Steps that cost money, and so must check the budget before they start. */
+const BILLABLE_STEPS: ReadonlySet<string> = new Set([
+  'harvest', 'draft_spec', 'draft_plan', 'implement', 'repair', 'auto_review',
+]);
+
 export interface RunArtifacts {
+  /** Repair attempts across the whole run, for `attemptsPerRun` (§11.2). */
+  repairAttemptsThisRun?: number;
   /** What the last write touched — the diff rung 1 of §11.2 reasons about. */
   lastTouched?: readonly string[];
   /** Per-task `git stash create` sha, taken before the task edited anything.
@@ -128,6 +135,13 @@ export class RealRunDriver {
       });
     const stream = (turn: AgentTurn) => this.emitTurn(runId, turn);
     const threshold = workflow.pipeline.gates.coverageThreshold;
+
+    // One check, at the one place every billable step passes through. Putting
+    // it in each step invites the next step to forget it.
+    if (BILLABLE_STEPS.has(step)) {
+      const spent = this.spentBudget(runId);
+      if (spent) return this.outOfBudget(runId, spent);
+    }
 
     switch (step) {
       // --- intake (§5.2) -----------------------------------------------------
@@ -781,6 +795,50 @@ export class RealRunDriver {
   }
 
   /**
+   * Which budget, if any, this run has spent (§11.2, §17).
+   *
+   * All three were declared on every workflow and compared against nothing:
+   * cost accumulated in `run.cost.usd`, the cap sat in
+   * `attemptBudget.maxUsd`, and no code joined them. `budget_exhausted` has
+   * accepted `'usd'` and `'wallclock'` since M0 and neither was ever emitted,
+   * so a run could spend without limit in exactly the phases that cost most.
+   *
+   * Checked before a billable step rather than after, because the point is to
+   * not make the call — noticing afterwards has already spent the money.
+   */
+  private spentBudget(runId: string): 'usd' | 'wallclock' | 'attempts' | undefined {
+    const handle = this.store.get(runId);
+    if (!handle) return undefined;
+    const { attemptBudget: budget } = handle.run;
+
+    if (handle.derived.cost.usd >= budget.maxUsd) return 'usd';
+
+    const startedAt = handle.derived.startedAt ?? handle.run.createdAt;
+    if ((Date.now() - startedAt) / 60_000 >= budget.maxWallClockMin) return 'wallclock';
+
+    if ((this.artifacts.get(runId)?.repairAttemptsThisRun ?? 0) >= budget.perRun) return 'attempts';
+    return undefined;
+  }
+
+  /** Park the run and say which limit bound, so the number can be raised. */
+  private outOfBudget(runId: string, which: 'usd' | 'wallclock' | 'attempts'): void {
+    const handle = this.store.get(runId);
+    if (handle) {
+      const { attemptBudget: b } = handle.run;
+      const detail = which === 'usd'
+        ? `$${handle.derived.cost.usd.toFixed(2)} of $${b.maxUsd}`
+        : which === 'wallclock'
+          ? `${Math.round((Date.now() - (handle.derived.startedAt ?? handle.run.createdAt)) / 60_000)} of ${b.maxWallClockMin} minutes`
+          : `${this.artifacts.get(runId)?.repairAttemptsThisRun ?? 0} of ${b.perRun} repair attempts`;
+      this.store.emitEvent(handle, {
+        t: 'log', level: 'warn',
+        message: `budget spent: ${detail}. Raise it in the workflow, or take over.`,
+      });
+    }
+    this.step(runId, { kind: 'budget_exhausted', which });
+  }
+
+  /**
    * Leave the repair loop the way §11.2's rungs 4 and 5 say to.
    *
    * Each exit is a different transition, and the machine owns all three: thrash
@@ -877,6 +935,20 @@ export class RealRunDriver {
 
     for (let attempt = 1; attempt <= budget; attempt += 1) {
       if (this.cancelled.has(runId)) return { ok: false, reason: 'error', detail: 'cancelled' };
+
+      // Checked before the attempt is counted, so a budget of N allows N
+      // attempts rather than N-1.
+      const spent = this.spentBudget(runId);
+      if (spent) {
+        return { ok: false, reason: 'budget', detail: `budget spent (${spent}) mid-repair` };
+      }
+
+      // Per-run, not per-task: N tasks at 4 attempts each is unbounded at the
+      // level the workflow's `attemptsPerRun` is trying to bound.
+      this.artifacts.set(runId, {
+        ...this.artifacts.get(runId),
+        repairAttemptsThisRun: (this.artifacts.get(runId)?.repairAttemptsThisRun ?? 0) + 1,
+      });
 
       this.store.emitEvent(handle, { t: 'task_status', taskId: packet.task.id, status: 'repairing', attempt });
 

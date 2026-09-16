@@ -7,7 +7,9 @@ import {
   type Effect, type LoadResult, type MachineState, type PipelineOptions,
   type ReplayState, type Trigger,
 } from '@agentflow/core';
-import type { NewRunEvent, PipelineProfile, Run, RunEvent } from '@agentflow/protocol';
+import type {
+  AttemptBudget, NewRunEvent, PipelineProfile, ResolvedWorkflow, Run, RunEvent,
+} from '@agentflow/protocol';
 import { runDir, runEventLogPath, runSnapshotPath, type WorkspacePaths } from '../paths.js';
 
 export interface RunHandle {
@@ -29,6 +31,23 @@ export interface CreateRunInput {
 }
 
 export const DEFAULT_WORKFLOW = 'feature';
+
+/**
+ * The run's budget, taken from its workflow (§21.6).
+ *
+ * It used to be four literals, so every workflow's budgets were decorative: a
+ * `chore` capped at $4 got the same $8 as a `feature`, and the numbers a user
+ * edited in their own workflow file changed nothing.
+ */
+function budgetFor(workflow: ResolvedWorkflow | undefined): AttemptBudget {
+  const b = workflow?.budgets;
+  return {
+    perTask: b?.attemptsPerTask ?? 4,
+    perRun: b?.attemptsPerRun ?? 12,
+    maxUsd: b?.perRunUsd ?? 8,
+    maxWallClockMin: b?.perTicketMinutes ?? 90,
+  };
+}
 
 /**
  * Owns every run in a workspace: their event logs, machine state, and the
@@ -118,7 +137,7 @@ export class RunStore extends EventEmitter {
       phase: 'intake',
       step: 'classify',
       status: 'queued',
-      attemptBudget: { perTask: 4, perRun: 12, maxUsd: 8, maxWallClockMin: 90 },
+      attemptBudget: budgetFor(this.loaded.workflows.get(workflow)?.resolved),
       cost: { usd: 0, inputTokens: 0, outputTokens: 0 },
       createdAt: now,
       updatedAt: now,
@@ -238,7 +257,7 @@ export class RunStore extends EventEmitter {
         phase: derived.phase,
         ...(derived.step ? { step: derived.step } : {}),
         status: derived.status,
-        attemptBudget: { perTask: 4, perRun: 12, maxUsd: 8, maxWallClockMin: 90 },
+        attemptBudget: budgetFor(this.loaded.workflows.get(DEFAULT_WORKFLOW)?.resolved),
         cost: derived.cost,
         createdAt: created.at,
         updatedAt: derived.updatedAt,

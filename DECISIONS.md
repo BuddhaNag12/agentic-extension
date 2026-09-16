@@ -771,3 +771,50 @@ Anti-sycophancy is one re-review, not a loop, for the same reason in reverse:
 the point is to catch a reflexive pass, not to argue the reviewer into finding
 something. An empty second pass is accepted — a fabricated finding is worse than
 none.
+
+## Decisions made enforcing the budgets
+
+### D54 — The run's budget comes from its workflow, and is actually compared
+
+Two separate failures, both of the same family as D44/D45: declared, plumbed,
+read by nothing.
+
+`Run.attemptBudget` was **four literals** in `RunStore.create`, so every
+workflow's `budgets` block was decorative — a `chore` capped at $4 got the same
+$8 as a `feature`, and a number a user edited in their own workflow file changed
+nothing. It is now projected from the resolved workflow.
+
+And nothing ever compared the budget to anything. Cost accumulated in
+`run.cost.usd`, the cap sat in `attemptBudget.maxUsd`, and no code joined them.
+`budget_exhausted` has accepted `'usd'` and `'wallclock'` since M0 and neither
+was ever emitted — only `'attempts'`, and only per task. A run could spend
+without limit in precisely the phases that cost most, which mattered little
+while `repair` and `auto_review` were stubs and matters now that they are not.
+
+`spentBudget()` is checked at the one place every billable step passes through,
+**before** the call rather than after: noticing afterwards has already spent the
+money. The escalation names the limit and both numbers, because the useful
+response to a spent budget is usually to raise it.
+
+*Per-session is not per-run.* Each phase passes `perRunUsd / N` as its own
+session cap, which bounds one call and not the run — a three-task run with
+repair rounds can make a dozen such calls. The per-session caps stay as a guard
+against a single runaway call; the authoritative per-run limit is this check.
+
+### D55 — A budget of N allows N attempts
+
+The first version incremented the run's repair counter and then asked whether
+the budget was spent, so `attemptsPerRun: 1` permitted zero attempts. The check
+now runs before the increment.
+
+Worth the note because the same off-by-one is available every time a budget and
+a counter meet, and a budget that silently permits one fewer than it says is
+the kind of thing that gets diagnosed as a model problem.
+
+### D56 — An async rejection does not reach a synchronous `catch`
+
+`Orchestrator.broadcast` wrapped `sendNotification` in `try`/`catch` and
+discarded the promise with `void`, so a write to a closed socket — a window
+closing mid-broadcast, which is routine — escaped as an unhandled rejection.
+The suite reported it as an error beside passing tests, which is exactly how
+such a thing survives: nothing fails.

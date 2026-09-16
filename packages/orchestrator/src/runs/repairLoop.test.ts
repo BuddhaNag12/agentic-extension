@@ -165,7 +165,14 @@ beforeEach(() => {
   );
 });
 
-afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+afterEach(async () => {
+  // A converged run walks on past the point these tests care about, and
+  // deleting the workspace under a live driver turns its next event append
+  // into an unhandled ENOENT.
+  driver.cancelAll();
+  await new Promise((r) => setTimeout(r, 60));
+  rmSync(root, { recursive: true, force: true });
+});
 
 const events = (runId: string, t: string) => store.events(runId).filter((e) => e.t === t);
 const statusOf = (runId: string) => store.get(runId)!.run.status;
@@ -284,5 +291,83 @@ describe('the repair loop gives up the right way', () => {
     const abandoned = events(runId, 'task_status')
       .filter((e) => (e as { status: string }).status === 'abandoned');
     expect(abandoned).toHaveLength(1);
+  });
+});
+
+describe('run-level budgets (§11.2, §17)', () => {
+  /** Put a run at repair with a specific budget already partly spent. */
+  async function withBudget(over: Partial<{ maxUsd: number; maxWallClockMin: number; perRun: number }>) {
+    const runId = await atRepair(4);
+    const handle = store.get(runId)!;
+    handle.run = { ...handle.run, attemptBudget: { ...handle.run.attemptBudget, ...over } };
+    return runId;
+  }
+
+  it('takes the budget from the workflow, not from four literals', async () => {
+    // Every workflow's budgets used to be decorative: a chore capped at $4 got
+    // the same $8 as a feature, and editing a workflow file changed nothing.
+    const wf = store.workflows.workflows.get('feature')!.resolved;
+    const handle = store.create({ ticketKey: 'PAY-9', summary: 'x' });
+    expect(handle.run.attemptBudget.maxUsd).toBe(wf.budgets.perRunUsd);
+    expect(handle.run.attemptBudget.perTask).toBe(wf.budgets.attemptsPerTask);
+    expect(handle.run.attemptBudget.perRun).toBe(wf.budgets.attemptsPerRun);
+    expect(handle.run.attemptBudget.maxWallClockMin).toBe(wf.budgets.perTicketMinutes);
+  });
+
+  it('refuses to start a billable step once the spend cap is reached', async () => {
+    // Checked *before* the call: noticing afterwards has already spent it. The
+    // cap has to be already breached for this to bite — nothing can know a
+    // call will exceed the budget before making it.
+    const runId = await withBudget({ maxUsd: 1 });
+    store.emitEvent(store.get(runId)!, {
+      t: 'cost', usd: 1.5, inputTokens: 0, outputTokens: 0, model: 'sonnet',
+    });
+
+    driver.start(runId);
+    await settle(runId);
+
+    expect(repairCalls).toBe(0);
+    expect(statusOf(runId)).toBe('blocked');
+    expect(JSON.stringify(store.events(runId))).toMatch(/budget spent/);
+  });
+
+  it('names the limit and the numbers, so it can be raised', async () => {
+    const runId = await withBudget({ maxWallClockMin: 0 });
+    driver.start(runId);
+    await settle(runId);
+
+    const logs = store.events(runId).filter((e) => e.t === 'log').map((e) => JSON.stringify(e)).join('\n');
+    expect(logs).toMatch(/Raise it in the workflow/);
+  });
+
+  it('stops on the wall clock', async () => {
+    const runId = await withBudget({ maxWallClockMin: 0 });
+    driver.start(runId);
+    await settle(runId);
+
+    expect(repairCalls).toBe(0);
+    expect(JSON.stringify(store.events(runId))).toMatch(/minutes/);
+  });
+
+  it('bounds repair attempts across the whole run, not just per task', async () => {
+    // Two tasks at four attempts each is eight, which `attemptsPerRun` exists
+    // to stop. The per-task budget alone never sees it.
+    gateScript = [false, false, false, false, false, false];
+    const runId = await withBudget({ perRun: 1 });
+    driver.start(runId);
+    await settle(runId);
+
+    expect(repairCalls).toBe(1);
+    expect(statusOf(runId)).toBe('blocked');
+  });
+
+  it('lets a run inside its budget proceed untouched', async () => {
+    gateScript = [true];
+    const runId = await withBudget({ maxUsd: 100, maxWallClockMin: 999, perRun: 99 });
+    driver.start(runId);
+    await settle(runId);
+
+    expect(repairCalls).toBe(1);
+    expect(statusOf(runId)).not.toBe('blocked');
   });
 });

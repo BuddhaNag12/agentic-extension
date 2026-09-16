@@ -106,12 +106,14 @@ exercised deterministically and for free.
   card with the branch, commit list, diffstat, gate summary, the acceptance
   criteria as a manual checklist, and the `git push` to run yourself
 
-- 361 tests: state machine, replay (including a property test), the schema
+- 367 tests: state machine, replay (including a property test), the schema
   2.0.0 log migration, failure signatures, concurrency, workflow validation,
   real git worktrees and rebases, real gate execution, a ship integration test
   that asserts nothing reaches `origin`, and a daemon integration test over the
   real socket
 
+- **Budgets** (§11.2, §17) — the run's spend, wall clock and repair attempts
+  come from its workflow and are checked before every billable step, not after
 - **Repair** (§11) — the bounded convergence loop: rungs 1–3 of §11.2's ladder
   (local fix, widen context, rethink on the escalation model in a fresh
   session), failure signatures as the only progress metric, a real rewind to
@@ -161,7 +163,7 @@ Everything else is a separate script, each independently runnable:
 |---|---|
 | `npm run build` | Compiles all packages, then bundles the extension and the daemon |
 | `npm run typecheck` | `tsc -b` across every package; no emit |
-| `npm test` | 361 tests (`npm run test:watch` to iterate) |
+| `npm test` | 367 tests (`npm run test:watch` to iterate) |
 | `npm run package` | Produces `agentflow.vsix` |
 | `npm run clean` | Removes `dist/` and build info |
 
