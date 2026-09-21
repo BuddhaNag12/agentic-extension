@@ -54,9 +54,13 @@ export class OrchestratorClient extends EventEmitter {
     // and every request the new extension added goes to a process that has
     // never heard of it. That is what an upgrade underneath a running daemon
     // looks like, and it is the normal case after installing a new `.vsix`.
+    // A lock with **no** build id is stale by definition: every daemon from
+    // this build forward records one, so its absence means the daemon predates
+    // the check. Treating "missing" as "fine" would mean the very first
+    // upgrade past this fix — the one that needs it most — silently attached
+    // to the old daemon anyway.
     const mine = entryBuildId(this.daemonEntry);
-    const stale = lock !== undefined && mine !== undefined
-      && lock.entryMtimeMs !== undefined && lock.entryMtimeMs !== mine;
+    const stale = lock !== undefined && mine !== undefined && lock.entryMtimeMs !== mine;
 
     if (stale) {
       this.log('the running orchestrator is from an older build; restarting it');

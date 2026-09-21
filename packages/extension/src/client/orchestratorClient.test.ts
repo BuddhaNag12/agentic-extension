@@ -119,6 +119,26 @@ describe('shutting the daemon down', () => {
     orchestrator = undefined;
   });
 
+  it('treats a lock with no build id as stale', async () => {
+    // Every daemon from this build forward records one, so its absence means
+    // the daemon predates the check — which is exactly the upgrade that needs
+    // it. Treating missing as fine would make the fix a no-op on first use.
+    await client.ensureConnected();
+    const firstPid = readLiveLock(lockFile())!.pid;
+
+    const { entryMtimeMs: _gone, ...older } = readLiveLock(lockFile())!;
+    writeFileSync(lockFile(), JSON.stringify(older));
+    client.dispose();
+
+    const next = new OrchestratorClient(root, daemonEntry, (m) => logs.push(m));
+    await next.ensureConnected().catch(() => undefined);
+    next.dispose();
+
+    expect(logs.join('\n')).toMatch(/older build; restarting/);
+    expect(readLiveLock(lockFile())?.pid).not.toBe(firstPid);
+    orchestrator = undefined;
+  });
+
   it('attaches when the build matches, and does not restart for nothing', async () => {
     await client.ensureConnected();
     const pid = readLiveLock(lockFile())!.pid;
