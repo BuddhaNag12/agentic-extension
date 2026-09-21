@@ -168,9 +168,11 @@ beforeEach(() => {
 afterEach(async () => {
   // A converged run walks on past the point these tests care about, and
   // deleting the workspace under a live driver turns its next event append
-  // into an unhandled ENOENT.
+  // into an unhandled ENOENT. Waiting for the driver to actually go quiet,
+  // not for a guessed 60ms — that guess held on one machine and not another,
+  // which is the worst kind of green.
   driver.cancelAll();
-  await new Promise((r) => setTimeout(r, 60));
+  await driver.settle();
   rmSync(root, { recursive: true, force: true });
 });
 

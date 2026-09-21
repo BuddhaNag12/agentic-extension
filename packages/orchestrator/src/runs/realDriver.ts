@@ -100,6 +100,23 @@ export class RealRunDriver {
   }
 
   /**
+   * Resolve once nothing is in flight.
+   *
+   * `cancel` only sets a flag that steps check at their boundaries, so a step
+   * already awaiting a git call or a gate run finishes afterwards — and writes
+   * its result. Anything that tears down a workspace has to wait for that, or
+   * the write lands in a directory that is no longer there and surfaces as an
+   * unhandled rejection with no failing test attached to it.
+   */
+  async settle(): Promise<void> {
+    // The chain grows as steps enqueue their successors, so drain until empty
+    // rather than awaiting one snapshot of it.
+    for (let i = 0; i < 100 && this.inFlight.size > 0; i += 1) {
+      await Promise.allSettled([...this.inFlight.values()]);
+    }
+  }
+
+  /**
    * One step at a time per run, chained rather than dropped. A step advances
    * by calling `step` from inside its own execution, so the next one is always
    * requested while the current is still in flight — dropping it would stall

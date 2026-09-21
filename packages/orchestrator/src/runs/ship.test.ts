@@ -91,7 +91,13 @@ beforeEach(() => {
   setUp([stubGate('unit', true)]);
 });
 
-afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+afterEach(async () => {
+  // Same reason as the repair tests: a step already awaiting a git call
+  // finishes after `cancel` and writes its result.
+  driver.cancelAll();
+  await driver.settle();
+  rmSync(root, { recursive: true, force: true });
+});
 
 const statusOf = (runId: string) => store.get(runId)!.run.status;
 const packagePath = (runId: string) => join(paths.runsDir, runId, 'artifacts', 'pr-package.md');

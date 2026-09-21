@@ -1065,3 +1065,20 @@ Two things that turned a failure into a hang, fixed alongside:
 - **The review command had no `catch`.** A rejection was swallowed by the
   command handler, so the only evidence was a progress notification that
   stopped moving.
+
+### D72 — Wait for the driver to go quiet, do not guess at it
+
+The driver tests tore down their workspace after `cancelAll()` and a 60 ms
+sleep. `cancel` only sets a flag that steps check at their *boundaries*, so a
+step already awaiting a git call or a gate run finishes afterwards and writes
+its result — into a directory that is no longer there. The result was an
+unhandled ENOENT reported beside 427 passing tests.
+
+It held on one machine and not another, which is the worst kind of green: the
+suite says pass, the error says something is wrong, and nothing connects the
+two to a test you can run.
+
+`RealRunDriver.settle()` awaits the in-flight chain until it is empty —
+draining in a loop rather than awaiting one snapshot, because a step enqueues
+its successor while the first is still resolving. Six consecutive runs of the
+two driver suites and three of the full suite, all clean.
