@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 /**
@@ -11,6 +11,27 @@ export interface LockInfo {
   endpoint: string;
   startedAt: number;
   version: string;
+  /**
+   * Which build this daemon is running, as the mtime of the bundle it was
+   * started from.
+   *
+   * `PROTOCOL_VERSION` was supposed to catch a client and daemon disagreeing,
+   * and did not: it is a hand-maintained constant that nobody bumped across
+   * five added methods, so an extension upgraded underneath a running daemon
+   * kept talking to the old one and its new requests went to a process that
+   * had never heard of them. A version nobody remembers to bump is not a
+   * version check; a build's own mtime cannot be forgotten.
+   */
+  entryMtimeMs?: number;
+}
+
+/** The build identity of a daemon bundle, or undefined if it is not there. */
+export function entryBuildId(entry: string): number | undefined {
+  try {
+    return statSync(entry).mtimeMs;
+  } catch {
+    return undefined;
+  }
 }
 
 export function readLock(lockFile: string): LockInfo | undefined {

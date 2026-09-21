@@ -1037,3 +1037,31 @@ finding that says a test fails carries a stack trace. What is *not* done is
 only the delta — so a red gate is reported as "may or may not predate the PR"
 rather than excused. Claiming it was pre-existing without checking would be
 the false negative equivalent of the false green.
+
+### D71 — The daemon's build identity, because the protocol version was never bumped
+
+"Stuck fetching PRs" was a daemon started two and a half hours before the
+`.vsix` that added `github/pulls`. It answered the handshake, so nothing looked
+broken, and every method the new extension had added went to a process that had
+never heard of it.
+
+`PROTOCOL_VERSION` exists precisely to catch this and did not: it is a
+hand-maintained constant, it was still `1` on both sides, and nobody had bumped
+it across five added methods. **A version nobody remembers to bump is not a
+version check.**
+
+The lockfile now records `entryMtimeMs` — the mtime of the bundle the daemon
+was started from — and the client compares it against the bundle it would spawn
+before attaching. Different build, restart it. This cannot be forgotten,
+because it is derived rather than declared, and it makes installing a new
+`.vsix` self-healing instead of requiring `pkill`.
+
+Two things that turned a failure into a hang, fixed alongside:
+
+- **Neither HTTP client had a timeout.** `fetch` waits forever by default, and
+  a request that never returns is worse than one that fails: the spinner spins,
+  nothing is logged, and there is nothing to act on. Both now abort at 15 s and
+  say so.
+- **The review command had no `catch`.** A rejection was swallowed by the
+  command handler, so the only evidence was a progress notification that
+  stopped moving.

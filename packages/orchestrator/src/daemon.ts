@@ -14,7 +14,7 @@ import {
   type RunIdParams,
 } from '@agentflow/protocol';
 import { HitlBroker } from './hitl.js';
-import { clearLock, writeLock } from './lock.js';
+import { clearLock, entryBuildId, writeLock } from './lock.js';
 import type { WorkspacePaths } from './paths.js';
 import { FakeRunDriver } from './runs/fakeDriver.js';
 import { RealRunDriver } from './runs/realDriver.js';
@@ -114,11 +114,13 @@ export class Orchestrator {
       this.server!.listen(this.paths.ipcEndpoint, resolve);
     });
 
+    const entry = entryBuildId(process.argv[1] ?? '');
     writeLock(this.paths.lockFile, {
       pid: process.pid,
       endpoint: this.paths.ipcEndpoint,
       startedAt: Date.now(),
       version: ORCHESTRATOR_VERSION,
+      ...(entry !== undefined ? { entryMtimeMs: entry } : {}),
     });
     return this.paths.ipcEndpoint;
   }

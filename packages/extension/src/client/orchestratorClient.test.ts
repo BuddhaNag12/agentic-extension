@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -20,16 +20,25 @@ process.env['AGENTFLOW_SIMULATE'] = '1';
 let root: string;
 let orchestrator: Orchestrator | undefined;
 let client: OrchestratorClient;
+let daemonEntry: string;
 const logs: string[] = [];
 
 beforeEach(async () => {
   root = mkdtempSync(join(tmpdir(), 'agentflow-client-'));
   logs.length = 0;
+  // A real file, because the build check reads its mtime. It is never
+  // actually spawned: a live lock exists, so the client attaches instead.
+  daemonEntry = join(root, 'daemon-entry.js');
+  writeFileSync(daemonEntry, '// never actually spawned in these tests\n');
+
   orchestrator = new Orchestrator(workspacePaths(root));
   await orchestrator.listen();
-  // The daemon entry is never spawned here: a live lock already exists, so the
-  // client attaches rather than starting one.
-  client = new OrchestratorClient(root, join(root, 'never-spawned.js'), (m) => logs.push(m));
+  // The in-process daemon records vitest's own argv[1] as its build. Point the
+  // lock at the entry these tests use, so "same build" is the default state
+  // and a mismatch is something a test opts into.
+  matchBuild();
+
+  client = new OrchestratorClient(root, daemonEntry, (m) => logs.push(m));
 });
 
 afterEach(() => {
@@ -39,6 +48,13 @@ afterEach(() => {
 });
 
 const lockFile = () => workspacePaths(root).lockFile;
+
+/** Rewrite the lock so it claims the daemon started from `daemonEntry`. */
+function matchBuild(): void {
+  const lock = readLiveLock(lockFile());
+  if (!lock) return;
+  writeFileSync(lockFile(), JSON.stringify({ ...lock, entryMtimeMs: statSync(daemonEntry).mtimeMs }));
+}
 
 describe('shutting the daemon down', () => {
   it('attaches to the running daemon rather than starting another', async () => {
@@ -74,11 +90,46 @@ describe('shutting the daemon down', () => {
     // With no live lock, a new client spawns. It is pointed at a path that does
     // not exist, so the *attempt* is what this asserts — the old behaviour
     // would have reattached and never tried.
-    const next = new OrchestratorClient(root, join(root, 'never-spawned.js'), (m) => logs.push(m));
+    const next = new OrchestratorClient(root, daemonEntry, (m) => logs.push(m));
     await next.ensureConnected().catch(() => undefined);
     next.dispose();
 
     expect(logs.join('\n')).toMatch(/spawning orchestrator daemon/);
+  });
+
+  it('replaces a daemon started from a different build', async () => {
+    // The bug: an extension upgraded underneath a running daemon kept talking
+    // to the old one, so every method the new version added went to a process
+    // that had never heard of it. Nothing errored — it just did nothing.
+    await client.ensureConnected();
+    const firstPid = readLiveLock(lockFile())!.pid;
+
+    // Rewrite the lock as if the daemon had started from an older bundle.
+    const lock = readLiveLock(lockFile())!;
+    writeFileSync(lockFile(), JSON.stringify({ ...lock, entryMtimeMs: 1 }));
+    client.dispose();
+
+    const next = new OrchestratorClient(root, daemonEntry, (m) => logs.push(m));
+    await next.ensureConnected().catch(() => undefined);
+    next.dispose();
+
+    expect(logs.join('\n')).toMatch(/older build; restarting/);
+    // It shut the old one down rather than attaching to it.
+    expect(readLiveLock(lockFile())?.pid).not.toBe(firstPid);
+    orchestrator = undefined;
+  });
+
+  it('attaches when the build matches, and does not restart for nothing', async () => {
+    await client.ensureConnected();
+    const pid = readLiveLock(lockFile())!.pid;
+    client.dispose();
+
+    const next = new OrchestratorClient(root, daemonEntry, (m) => logs.push(m));
+    await next.ensureConnected();
+    next.dispose();
+
+    expect(logs.join('\n')).not.toMatch(/older build/);
+    expect(readLiveLock(lockFile())?.pid).toBe(pid);
   });
 
   // The `false` return — the daemon was asked to leave and did not — is not

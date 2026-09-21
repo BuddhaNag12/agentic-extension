@@ -12,7 +12,7 @@ import {
   type CreateRunParams, type PendingChangedNotification, type RefreshInboxParams, type Run,
   type WorkInboxSnapshot,
 } from '@agentflow/protocol';
-import { readLiveLock, workspacePaths } from '@agentflow/orchestrator';
+import { entryBuildId, readLiveLock, workspacePaths } from '@agentflow/orchestrator';
 
 /**
  * The extension host's RPC client (§2.2, §2.3). It attaches to a running
@@ -47,8 +47,24 @@ export class OrchestratorClient extends EventEmitter {
 
   private async doConnect(): Promise<void> {
     const paths = workspacePaths(this.workspaceRoot);
-    let endpoint = readLiveLock(paths.lockFile)?.endpoint;
+    const lock = readLiveLock(paths.lockFile);
 
+    // A daemon started from a different build than the one this extension
+    // ships is worse than no daemon: it answers, so nothing looks broken,
+    // and every request the new extension added goes to a process that has
+    // never heard of it. That is what an upgrade underneath a running daemon
+    // looks like, and it is the normal case after installing a new `.vsix`.
+    const mine = entryBuildId(this.daemonEntry);
+    const stale = lock !== undefined && mine !== undefined
+      && lock.entryMtimeMs !== undefined && lock.entryMtimeMs !== mine;
+
+    if (stale) {
+      this.log('the running orchestrator is from an older build; restarting it');
+      await this.shutdownDaemon();
+      this.disposed = false;
+    }
+
+    let endpoint = stale ? undefined : lock?.endpoint;
     if (endpoint) {
       this.log(`attaching to existing orchestrator at ${endpoint}`);
     } else {
@@ -203,10 +219,20 @@ export class OrchestratorClient extends EventEmitter {
   async shutdownDaemon(timeoutMs = 5_000): Promise<boolean> {
     const paths = workspacePaths(this.workspaceRoot);
     try {
-      await this.ensureConnected();
+      // A short-lived connection of its own: `ensureConnected` is one of this
+      // method's callers, and reusing it here would recurse.
+      const endpoint = readLiveLock(paths.lockFile)?.endpoint;
+      if (!endpoint) return true;
+      const socket = await connectWithRetry(endpoint, 4);
+      const connection = createMessageConnection(
+        new SocketMessageReader(socket), new SocketMessageWriter(socket),
+      );
+      connection.listen();
       // The daemon exits on a timer after replying, so a dropped connection
       // here is the request succeeding, not failing.
-      await this.request(Methods.shutdown, {});
+      await connection.sendRequest(Methods.shutdown, {});
+      connection.dispose();
+      socket.destroy();
     } catch (err) {
       this.log(`shutdown request did not complete: ${err instanceof Error ? err.message : String(err)}`);
     }

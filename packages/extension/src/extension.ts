@@ -97,11 +97,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('agentflow.answerNext', (node?: InboxNode) => respond(node ?? inbox.first())),
     vscode.commands.registerCommand('agentflow.reviewPullRequest', async () => {
       if (!client) return;
-      const filter = await pickLabelFilter(client, context.secrets);
-      if (!filter) return;
-      const pr = await pickPullRequest(client, context.secrets, filter);
-      if (!pr) return;
-      await startReview(client, pr);
+      try {
+        const filter = await pickLabelFilter(client, context.secrets);
+        if (!filter) return;
+        const pr = await pickPullRequest(client, context.secrets, filter);
+        if (!pr) return;
+        await startReview(client, pr);
+      } catch (err) {
+        // Without this the rejection is swallowed by the command handler and
+        // the only evidence is a progress notification that stops moving.
+        const message = err instanceof Error ? err.message : String(err);
+        log(`review command failed: ${message}`);
+        void vscode.window.showErrorMessage(`AgentFlow: ${message}`);
+      }
     }),
 
     vscode.commands.registerCommand('agentflow.setJiraCredentials', async () => {

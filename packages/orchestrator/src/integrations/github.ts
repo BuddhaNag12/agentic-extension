@@ -67,7 +67,10 @@ export class GitHubError extends Error {
 }
 
 /** Injectable so tests exercise the query building without a network. */
-export type Fetcher = (url: string, init: { headers: Record<string, string> }) => Promise<{
+export type Fetcher = (
+  url: string,
+  init: { headers: Record<string, string>; signal?: AbortSignal },
+) => Promise<{
   ok: boolean;
   status: number;
   json: () => Promise<unknown>;
@@ -78,7 +81,15 @@ export interface GitHubOptions {
   token: string;
   api?: string;
   fetcher?: Fetcher;
+  timeoutMs?: number;
 }
+
+/**
+ * `fetch` waits forever by default, and a request that never returns is worse
+ * than one that fails: the spinner spins, nothing is logged, and there is
+ * nothing to act on.
+ */
+export const DEFAULT_TIMEOUT_MS = 15_000;
 
 /**
  * `owner/name` from a git remote URL.
@@ -177,14 +188,29 @@ export class GitHubClient {
   }
 
   private async get<T>(url: string): Promise<T> {
-    const res = await this.fetcher(url, {
-      headers: {
-        accept: 'application/vnd.github+json',
-        authorization: `Bearer ${this.opts.token}`,
-        'x-github-api-version': '2022-11-28',
-        'user-agent': 'agentflow',
-      },
-    });
+    const timeoutMs = this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), timeoutMs);
+
+    let res: Awaited<ReturnType<Fetcher>>;
+    try {
+      res = await this.fetcher(url, {
+        headers: {
+          accept: 'application/vnd.github+json',
+          authorization: `Bearer ${this.opts.token}`,
+          'x-github-api-version': '2022-11-28',
+          'user-agent': 'agentflow',
+        },
+        signal: abort.signal,
+      });
+    } catch (err) {
+      if (abort.signal.aborted) {
+        throw new GitHubError(0, `GitHub did not respond within ${timeoutMs / 1000}s.`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (!res.ok) {
       // The three that actually happen get their own message, because "GitHub

@@ -36,7 +36,13 @@ export class JiraError extends Error {
   }
 }
 
-export type JiraFetcher = (url: string, init: { headers: Record<string, string> }) => Promise<{
+/** See `DEFAULT_TIMEOUT_MS` in the GitHub client: a hang is worse than a failure. */
+export const JIRA_TIMEOUT_MS = 15_000;
+
+export type JiraFetcher = (
+  url: string,
+  init: { headers: Record<string, string>; signal?: AbortSignal },
+) => Promise<{
   ok: boolean;
   status: number;
   json: () => Promise<unknown>;
@@ -78,13 +84,27 @@ export class JiraClient {
     // Basic with an API token is what Atlassian Cloud takes for a PAT; the
     // header is built here rather than stored so the token is in one place.
     const basic = Buffer.from(`${this.config.email}:${this.config.token}`).toString('base64');
-    const res = await this.fetcher(url, {
-      headers: {
-        accept: 'application/json',
-        authorization: `Basic ${basic}`,
-        'user-agent': 'agentflow',
-      },
-    });
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), JIRA_TIMEOUT_MS);
+
+    let res: Awaited<ReturnType<JiraFetcher>>;
+    try {
+      res = await this.fetcher(url, {
+        headers: {
+          accept: 'application/json',
+          authorization: `Basic ${basic}`,
+          'user-agent': 'agentflow',
+        },
+        signal: abort.signal,
+      });
+    } catch (err) {
+      if (abort.signal.aborted) {
+        throw new JiraError(0, `Jira did not respond within ${JIRA_TIMEOUT_MS / 1000}s.`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (!res.ok) {
       const detail = await res.text().catch(() => '');

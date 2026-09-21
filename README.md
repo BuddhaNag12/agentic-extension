@@ -110,7 +110,7 @@ exercised deterministically and for free.
   card with the branch, commit list, diffstat, gate summary, the acceptance
   criteria as a manual checklist, and the `git push` to run yourself
 
-- 424 tests: state machine, replay (including a property test), the schema
+- 426 tests: state machine, replay (including a property test), the schema
   2.0.0 log migration, failure signatures, concurrency, workflow validation,
   real git worktrees and rebases, real gate execution, a ship integration test
   that asserts nothing reaches `origin`, and a daemon integration test over the
@@ -183,7 +183,7 @@ Everything else is a separate script, each independently runnable:
 |---|---|
 | `npm run build` | Compiles all packages, then bundles the extension and the daemon |
 | `npm run typecheck` | `tsc -b` across every package; no emit |
-| `npm test` | 424 tests (`npm run test:watch` to iterate) |
+| `npm test` | 426 tests (`npm run test:watch` to iterate) |
 | `npm run package` | Produces `agentflow.vsix` (`--skip-license`; see below) |
 | `npm run clean` | Removes `dist/` and build info |
 
