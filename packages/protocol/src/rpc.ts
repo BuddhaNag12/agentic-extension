@@ -51,6 +51,53 @@ export const ListWorkflowsResult = z.object({
 export type ListWorkflowsResult = z.infer<typeof ListWorkflowsResult>;
 export const CreateRunResult = z.object({ run: Run });
 
+/**
+ * Listing pull requests for review (§6.1, §7.7).
+ *
+ * `labels` is a discriminated filter rather than an optional array, because
+ * "tagged with X" and "carrying no labels at all" are different questions —
+ * an empty array would be ambiguous between them, and "untriaged" is the one
+ * people actually want.
+ */
+export const PrLabelFilter = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('any') }),
+  z.object({ kind: z.literal('tagged'), labels: z.array(z.string()).min(1) }),
+  z.object({ kind: z.literal('untagged') }),
+]);
+
+export const ListPullRequestsParams = z.object({
+  labels: PrLabelFilter.default({ kind: 'any' }),
+  state: z.enum(['open', 'closed', 'all']).default('open'),
+  reviewRequested: z.boolean().default(false),
+  author: z.string().optional(),
+  limit: z.number().int().positive().max(100).default(30),
+  /** Supplied by the extension host from `SecretStorage`; the daemon has none. */
+  token: z.string().optional(),
+});
+
+export const PullRequestSummary = z.object({
+  number: z.number().int().positive(),
+  title: z.string(),
+  url: z.string(),
+  author: z.string(),
+  labels: z.array(z.string()),
+  draft: z.boolean(),
+  updatedAt: z.string(),
+});
+
+export const ListPullRequestsResult = z.object({
+  repo: z.object({ owner: z.string(), name: z.string() }).optional(),
+  pullRequests: z.array(PullRequestSummary),
+  /** Set when the list could not be fetched, with what to do about it. */
+  problem: z.string().optional(),
+});
+
+export const ListLabelsParams = z.object({ token: z.string().optional() });
+export const ListLabelsResult = z.object({
+  labels: z.array(z.string()),
+  problem: z.string().optional(),
+});
+
 export const RunIdParams = z.object({ runId: RunId });
 export const ListRunsResult = z.object({ runs: z.array(Run) });
 
@@ -88,6 +135,8 @@ export const Methods = {
   decideApproval: 'hitl/decide',
   listPending: 'hitl/pending',
   listWorkflows: 'workflow/list',
+  listPullRequests: 'github/pulls',
+  listLabels: 'github/labels',
 } as const;
 
 // --- notifications (orchestrator → extension) ------------------------------
@@ -107,6 +156,11 @@ export type RunEventNotification = EnvelopedEvent;
 
 export type HandshakeParams = z.infer<typeof HandshakeParams>;
 export type HandshakeResult = z.infer<typeof HandshakeResult>;
+export type ListPullRequestsParams = z.infer<typeof ListPullRequestsParams>;
+export type ListPullRequestsResult = z.infer<typeof ListPullRequestsResult>;
+export type ListLabelsParams = z.infer<typeof ListLabelsParams>;
+export type ListLabelsResult = z.infer<typeof ListLabelsResult>;
+export type PrLabelFilter = z.infer<typeof PrLabelFilter>;
 export type CreateRunParams = z.infer<typeof CreateRunParams>;
 export type CreateRunResult = z.infer<typeof CreateRunResult>;
 export type RunIdParams = z.infer<typeof RunIdParams>;

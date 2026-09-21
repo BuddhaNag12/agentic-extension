@@ -837,3 +837,50 @@ details are the point rather than the plumbing:
 - It **asks first** when runs are in flight, naming them. `dispose()` leaving
   the daemon alive is deliberate — a window reload must not kill a run — so a
   command that genuinely stops it has to be the one that says so.
+
+## Decisions made adding the GitHub PR queue
+
+### D58 — `fetch`, not octokit
+
+§7.7's read surface is six plain REST calls, and Node has had `fetch` since 18.
+A dependency would have to be vendored beside the bundle the way the Agent SDK
+is (D42), because the packaged `.vsix` ships no `node_modules` — so octokit
+would cost megabytes and a second vendoring path to save a few lines.
+
+The module is **read-only on purpose**. §7.5 is emphatic that findings are
+never auto-posted, and a module with no write method cannot be made to post by
+accident later.
+
+### D59 — Tagged and untagged are different queries, not one list filtered twice
+
+`labels` is a discriminated union — `any`, `tagged`, `untagged` — rather than
+an optional array. An empty array would be ambiguous between "no filter" and
+"no labels", and the untagged case is the one people actually want: it is the
+untriaged pile, and a list of everything never surfaces it.
+
+Both are resolved **server-side** through the search API. A busy repo's open
+PRs run to hundreds, and paginating all of them to filter locally is the
+difference between a queue that opens instantly and one nobody waits for.
+
+### D60 — Three token sources, explicit ones first
+
+`SecretStorage` (what the §7.7 PAT lives in), then `$AGENTFLOW_GITHUB_TOKEN`
+and the conventional `$GITHUB_TOKEN`/`$GH_TOKEN`, then `gh auth token`. The
+`gh` fallback is last because it is the least explicit, and present at all
+because a developer already signed in should not have to mint a second token.
+
+Absence returns undefined rather than throwing: a workspace that only runs the
+deliver pipeline has no GitHub configuration and that is not an error. The
+required scope is named in the code that requires it, because "what does it
+ask for" is the first question a security review asks.
+
+Failures are **returned, not thrown**, across the RPC boundary. An unreachable
+GitHub is a state the list can render with the fix in it; an RPC error would
+surface as a toast with a stack trace. 404 in particular says what it usually
+means on a private repo — a token that cannot see it — rather than sending
+someone to hunt a missing PR.
+
+*Not yet done:* running a review against a PR. The queue is real; §7's pipeline
+— fetching `pull/N/head` into a worktree, claim conformance, the local gate run
+on the merge-base delta — is not. The command says so rather than starting
+something that quietly does nothing.

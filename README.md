@@ -106,7 +106,7 @@ exercised deterministically and for free.
   card with the branch, commit list, diffstat, gate summary, the acceptance
   criteria as a manual checklist, and the `git push` to run yourself
 
-- 371 tests: state machine, replay (including a property test), the schema
+- 396 tests: state machine, replay (including a property test), the schema
   2.0.0 log migration, failure signatures, concurrency, workflow validation,
   real git worktrees and rebases, real gate execution, a ship integration test
   that asserts nothing reaches `origin`, and a daemon integration test over the
@@ -127,9 +127,15 @@ exercised deterministically and for free.
   nit reach you without stopping the run. Unplanned files are computed, not
   asked. A large diff that comes back empty gets one adversarial re-review
 
-Not yet real: §5.7's four narrow passes (this is one), the eval harness that
-measures whether any of it works, the Work Inbox (§6), the PR review pipeline
-(§7), and Jira/Figma/GitHub.
+- **GitHub PR queue** (§6.1, §7.7) — list a repository's pull requests
+  filtered by label: all, **tagged** with labels you pick, or **untagged** —
+  the untriaged pile. Read-only, on `fetch` with no new dependency; the token
+  comes from `SecretStorage`, an environment variable, or `gh`
+
+Not yet real: running a review *against* a PR (the queue is there; §7's
+worktree-at-head, claim conformance and merge-base gate run are not), §5.7's
+four narrow passes (this is one), the eval harness, the rest of the Work Inbox
+(§6), and Jira/Figma.
 
 ## Layout
 
@@ -163,7 +169,7 @@ Everything else is a separate script, each independently runnable:
 |---|---|
 | `npm run build` | Compiles all packages, then bundles the extension and the daemon |
 | `npm run typecheck` | `tsc -b` across every package; no emit |
-| `npm test` | 371 tests (`npm run test:watch` to iterate) |
+| `npm test` | 396 tests (`npm run test:watch` to iterate) |
 | `npm run package` | Produces `agentflow.vsix` |
 | `npm run clean` | Removes `dist/` and build info |
 
@@ -214,6 +220,7 @@ blocks with a clear message if it is missing.
 |---|---|
 | `AGENTFLOW_CLAUDE_PATH` | Point at a `claude` binary that is not on `PATH` |
 | `AGENTFLOW_SDK_PATH` | Point at an `sdk.mjs` directly, e.g. a local SDK checkout |
+| `AGENTFLOW_GITHUB_TOKEN` | GitHub token for the PR queue (or `GITHUB_TOKEN`/`GH_TOKEN`, or `gh auth login`, or **AgentFlow: Set GitHub Token**) |
 
 The CLI must also be **signed in** — `claude auth login`. Being signed into the
 Claude Code app is not the same thing: the app holds its own session, and a

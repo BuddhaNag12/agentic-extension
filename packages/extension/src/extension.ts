@@ -4,6 +4,7 @@ import type { PendingChangedNotification, Run } from '@agentflow/protocol';
 import { OrchestratorClient } from './client/orchestratorClient.js';
 import { RunsTreeProvider } from './views/runsTree.js';
 import { InboxTreeProvider, type InboxNode } from './views/inboxTree.js';
+import { GITHUB_TOKEN_KEY, pickLabelFilter, pickPullRequest } from './views/pullRequests.js';
 import { RunDetailPanel } from './views/runDetailPanel.js';
 import { StatusBar } from './statusBar.js';
 
@@ -68,6 +69,39 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (yes) await client?.cancelRun(run.id);
     }),
     vscode.commands.registerCommand('agentflow.answerNext', (node?: InboxNode) => respond(node ?? inbox.first())),
+    vscode.commands.registerCommand('agentflow.reviewPullRequest', async () => {
+      if (!client) return;
+      const filter = await pickLabelFilter(client, context.secrets);
+      if (!filter) return;
+      const pr = await pickPullRequest(client, context.secrets, filter);
+      if (!pr) return;
+
+      // Listing and picking work today; running the review against the PR head
+      // is the rest of §7 and is not wired yet. Saying so beats starting
+      // something that quietly does nothing.
+      void vscode.window.showInformationMessage(
+        `AgentFlow: #${pr.number} — ${pr.title}. Reviewing a pull request is not wired up yet; ` +
+        'the queue is.',
+      );
+    }),
+
+    vscode.commands.registerCommand('agentflow.setGitHubToken', async () => {
+      const token = await vscode.window.showInputBox({
+        title: 'GitHub token for AgentFlow',
+        prompt: 'Fine-grained PAT with Pull requests: Read. Stored in VS Code SecretStorage.',
+        password: true,
+        ignoreFocusOut: true,
+      });
+      if (token === undefined) return;
+      if (token === '') {
+        await context.secrets.delete(GITHUB_TOKEN_KEY);
+        void vscode.window.showInformationMessage('AgentFlow: GitHub token cleared.');
+        return;
+      }
+      await context.secrets.store(GITHUB_TOKEN_KEY, token);
+      void vscode.window.showInformationMessage('AgentFlow: GitHub token saved.');
+    }),
+
     vscode.commands.registerCommand('agentflow.showLog', () => output.show()),
     vscode.commands.registerCommand('agentflow.restartOrchestrator', async () => {
       // A real restart, which means the daemon exits. The old version only

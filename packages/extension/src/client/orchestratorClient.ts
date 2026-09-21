@@ -7,7 +7,9 @@ import {
 } from 'vscode-jsonrpc/node.js';
 import {
   Methods, Notifications, PROTOCOL_VERSION,
-  type EnvelopedEvent, type HandshakeResult, type PendingChangedNotification, type Run,
+  type EnvelopedEvent, type HandshakeResult, type ListLabelsParams, type ListLabelsResult,
+  type ListPullRequestsParams, type ListPullRequestsResult,
+  type PendingChangedNotification, type Run,
 } from '@agentflow/protocol';
 import { readLiveLock, workspacePaths } from '@agentflow/orchestrator';
 
@@ -162,6 +164,14 @@ export class OrchestratorClient extends EventEmitter {
 
   decideApproval(params: { runId: string; approvalId: string; gate: string; decision: string; note?: string }): Promise<unknown> {
     return this.request(Methods.decideApproval, params);
+  }
+
+  listPullRequests(params: ListPullRequestsParams): Promise<ListPullRequestsResult> {
+    return this.request(Methods.listPullRequests, params);
+  }
+
+  listLabels(params: ListLabelsParams): Promise<ListLabelsResult> {
+    return this.request(Methods.listLabels, params);
   }
 
   dispose(): void {

@@ -1,6 +1,6 @@
 {
   "name": "agentflow",
-  "displayName": "AgentFlow — Ticket to PR",
+  "displayName": "AgentFlow \u2014 Ticket to PR",
   "description": "Turn a ticket into a reviewed, tested, gated pull request",
   "version": "0.0.1",
   "private": true,
@@ -90,6 +90,15 @@
       {
         "command": "agentflow.restartOrchestrator",
         "title": "AgentFlow: Restart Orchestrator"
+      },
+      {
+        "command": "agentflow.reviewPullRequest",
+        "title": "AgentFlow: Review a GitHub Pull Request",
+        "icon": "$(git-pull-request)"
+      },
+      {
+        "command": "agentflow.setGitHubToken",
+        "title": "AgentFlow: Set GitHub Token"
       }
     ],
     "menus": {

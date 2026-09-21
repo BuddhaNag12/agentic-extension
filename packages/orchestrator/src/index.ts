@@ -9,3 +9,5 @@ export * from './runs/realDriver.js';
 export * from './runs/prPackage.js';
 export * from './git/worktree.js';
 export * from './git/exec.js';
+export * from './integrations/github.js';
+export * from './integrations/githubAuth.js';

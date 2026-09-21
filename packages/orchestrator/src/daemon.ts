@@ -9,7 +9,8 @@ import type { Effect } from '@agentflow/core';
 import {
   Methods, Notifications, PROTOCOL_VERSION,
   type AnswerQuestionParams, type CreateRunParams, type DecideApprovalParams,
-  type GetEventsParams, type HandshakeParams, type HandshakeResult, type RunIdParams,
+  type GetEventsParams, type HandshakeParams, type HandshakeResult,
+  type ListLabelsParams, type ListPullRequestsParams, type RunIdParams,
 } from '@agentflow/protocol';
 import { HitlBroker } from './hitl.js';
 import { clearLock, writeLock } from './lock.js';
@@ -17,6 +18,8 @@ import type { WorkspacePaths } from './paths.js';
 import { FakeRunDriver } from './runs/fakeDriver.js';
 import { RealRunDriver } from './runs/realDriver.js';
 import { RunStore } from './runs/store.js';
+import { GitHubClient, type RepoCoordinates } from './integrations/github.js';
+import { detectRepo, resolveGitHubToken, tokenSetupHint } from './integrations/githubAuth.js';
 import { Scheduler, limitsForMachine } from './scheduler.js';
 
 export const ORCHESTRATOR_VERSION = '0.0.1';
@@ -254,6 +257,36 @@ export class Orchestrator {
       };
     });
 
+    c.onRequest(Methods.listPullRequests, async (p: ListPullRequestsParams) => {
+      const gh = await this.github(p.token);
+      if ('problem' in gh) return { pullRequests: [], problem: gh.problem };
+      try {
+        const pullRequests = await gh.client.listPullRequests({
+          repo: gh.repo,
+          labels: p.labels,
+          state: p.state,
+          reviewRequested: p.reviewRequested,
+          ...(p.author ? { author: p.author } : {}),
+          limit: p.limit,
+        });
+        return { repo: gh.repo, pullRequests };
+      } catch (err) {
+        // Returned rather than thrown: an unreachable GitHub is a state the
+        // list can render, and an RPC error would only surface as a toast.
+        return { repo: gh.repo, pullRequests: [], problem: message(err) };
+      }
+    });
+
+    c.onRequest(Methods.listLabels, async (p: ListLabelsParams) => {
+      const gh = await this.github(p.token);
+      if ('problem' in gh) return { labels: [], problem: gh.problem };
+      try {
+        return { labels: await gh.client.listLabels(gh.repo) };
+      } catch (err) {
+        return { labels: [], problem: message(err) };
+      }
+    });
+
     c.onRequest(Methods.shutdown, () => {
       setTimeout(() => this.shutdown(), 50);
       return { ok: true };
@@ -323,6 +356,27 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * A GitHub client for this workspace, or why there is not one.
+   *
+   * Both halves can be absent independently — a workspace with no GitHub
+   * remote and one with no token are different problems with different fixes,
+   * so they get different messages rather than one "GitHub unavailable".
+   */
+  private async github(
+    token?: string,
+  ): Promise<{ client: GitHubClient; repo: RepoCoordinates } | { problem: string }> {
+    const repo = await detectRepo(this.paths.root);
+    if (!repo) {
+      return { problem: 'no GitHub remote found for this workspace.' };
+    }
+    const resolved = await resolveGitHubToken({ ...(token ? { stored: token } : {}) });
+    if (!resolved) return { problem: tokenSetupHint() };
+
+    log(`github: ${repo.owner}/${repo.name} via ${resolved.from}`);
+    return { client: new GitHubClient({ token: resolved.token }), repo };
+  }
+
   private pendingPayload() {
     const { questions, approvals } = this.hitl.pending();
     return {
@@ -353,6 +407,10 @@ function approvalSummary(gate: string, ticket: string): string {
     case 'G2': return `${ticket}: approve the approach and task breakdown before any code is written.`;
     default: return `${ticket}: review the diff, gate results and plan conformance.`;
   }
+}
+
+function message(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function log(message: string): void {
