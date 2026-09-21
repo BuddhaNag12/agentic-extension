@@ -927,3 +927,19 @@ fallback palette, and three things only showed up on screen:
   routinely split or narrow, so below 860px they stack — with
   `align-content: start`, without which the grid stretches its rows and leaves
   a dead gap between the activity list and the decisions.
+
+### D64 — The sidebar opening is the signal to reveal the dashboard
+
+An activity-bar icon can only open its own view container; VS Code offers no
+way to bind one to an editor tab. So the container becoming visible is taken as
+the intent — clicking the AgentFlow icon means "show me AgentFlow", and the
+board belongs in the editor area where it has room (D61).
+
+`onlyIfHidden` and `preserveFocus` are both load-bearing. Without the first,
+every return to the sidebar re-reveals a panel already in front and changes the
+active tab under the human; without the second, clicking the sidebar throws
+focus into the editor, which is the opposite of what a sidebar click asks for.
+
+`agentflow.ui.openDashboardOnClick` turns it off, because an editor tab that
+appears when you touch the sidebar is exactly the kind of helpfulness that
+becomes irritating on the fiftieth time.

@@ -65,9 +65,17 @@ export class Dashboard {
     void this.snapshot();
   }
 
-  static show(client: OrchestratorClient, column = vscode.ViewColumn.One): void {
+  static show(
+    client: OrchestratorClient,
+    column = vscode.ViewColumn.One,
+    opts: { onlyIfHidden?: boolean; preserveFocus?: boolean } = {},
+  ): void {
     if (Dashboard.current) {
-      Dashboard.current.panel.reveal(column);
+      // `onlyIfHidden` is for the automatic openers. Revealing a panel that is
+      // already in front does nothing useful and, when it is not the active
+      // tab group, yanks focus away from whatever the human was reading.
+      if (opts.onlyIfHidden && Dashboard.current.panel.visible) return;
+      Dashboard.current.panel.reveal(column, opts.preserveFocus ?? false);
       return;
     }
     const panel = vscode.window.createWebviewPanel(
@@ -83,6 +91,10 @@ export class Dashboard {
 
   static isOpen(): boolean {
     return Dashboard.current !== undefined;
+  }
+
+  static isVisible(): boolean {
+    return Dashboard.current?.panel.visible ?? false;
   }
 
   private async onMessage(m: { type: string; [k: string]: unknown }): Promise<void> {

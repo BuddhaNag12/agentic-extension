@@ -59,8 +59,8 @@ exercised deterministically and for free.
   and escalation
 - **Dashboard** (§12.1) — every run as a swimlane with its seven phases lit,
   the decisions waiting on you with inline approve/answer, and the selected
-  run's live activity, in one editor tab. Opens on connect; the runs tree and
-  status bar stay for the badge and quick access
+  run's live activity, in one editor tab. Clicking the AgentFlow icon reveals
+  it; the runs tree and status bar stay for the badge and quick access
 - Runs tree, inbox, status bar, and a live run-detail timeline
 - Schema 2.0.0, with pre-2.0.0 logs migrated **on read** and never rewritten —
   ten legacy phase names become steps, and a dropped event is counted and
@@ -225,6 +225,10 @@ blocks with a clear message if it is missing.
 | `AGENTFLOW_CLAUDE_PATH` | Point at a `claude` binary that is not on `PATH` |
 | `AGENTFLOW_SDK_PATH` | Point at an `sdk.mjs` directly, e.g. a local SDK checkout |
 | `AGENTFLOW_GITHUB_TOKEN` | GitHub token for the PR queue (or `GITHUB_TOKEN`/`GH_TOKEN`, or `gh auth login`, or **AgentFlow: Set GitHub Token**) |
+
+Two settings control when the dashboard appears — `agentflow.ui.openDashboardOnStart`
+(when the orchestrator connects) and `agentflow.ui.openDashboardOnClick` (when
+the AgentFlow sidebar is opened). Both default on.
 
 The CLI must also be **signed in** — `claude auth login`. Being signed into the
 Claude Code app is not the same thing: the app holds its own session, and a

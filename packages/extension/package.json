@@ -154,6 +154,11 @@
           "type": "boolean",
           "default": true,
           "description": "Open the AgentFlow dashboard in an editor tab when the orchestrator connects."
+        },
+        "agentflow.ui.openDashboardOnClick": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reveal the AgentFlow dashboard in an editor tab when the AgentFlow sidebar is opened."
         }
       }
     }

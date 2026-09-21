@@ -41,6 +41,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const inboxView = vscode.window.createTreeView('agentflow.inbox', { treeDataProvider: inbox });
   context.subscriptions.push(runsView, inboxView);
 
+  /**
+   * Clicking the AgentFlow icon opens the dashboard.
+   *
+   * An activity-bar icon can only open its own view container — VS Code gives
+   * no way to bind one to an editor tab. So the container opening is the
+   * signal: the moment the sidebar becomes visible, the dashboard is revealed
+   * in the editor area, which is where the run board is meant to be read.
+   *
+   * `onlyIfHidden` matters. Without it, every return to the sidebar re-reveals
+   * a panel that is already in front and drags focus out of whatever the human
+   * was reading.
+   */
+  const revealOnOpen = (visible: boolean) => {
+    if (!visible || !client) return;
+    if (!vscode.workspace.getConfiguration('agentflow').get<boolean>('ui.openDashboardOnClick', true)) {
+      return;
+    }
+    Dashboard.show(client, vscode.ViewColumn.One, { onlyIfHidden: true, preserveFocus: true });
+  };
+  context.subscriptions.push(
+    runsView.onDidChangeVisibility((e) => revealOnOpen(e.visible)),
+    inboxView.onDidChangeVisibility((e) => revealOnOpen(e.visible)),
+  );
+  if (runsView.visible) revealOnOpen(true);
+
   client.on('pendingChanged', (p: PendingChangedNotification) => {
     const count = p.approvals.length + p.questions.length;
     inboxView.badge = count > 0 ? { value: count, tooltip: `${count} awaiting you` } : undefined;
