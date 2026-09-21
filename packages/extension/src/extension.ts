@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { join } from 'node:path';
-import type { PendingChangedNotification, Run } from '@agentflow/protocol';
+import type { PendingChangedNotification, PipelineProfile, Run } from '@agentflow/protocol';
 import { OrchestratorClient } from './client/orchestratorClient.js';
 import { RunsTreeProvider } from './views/runsTree.js';
 import { InboxTreeProvider, type InboxNode } from './views/inboxTree.js';
@@ -101,14 +101,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!filter) return;
       const pr = await pickPullRequest(client, context.secrets, filter);
       if (!pr) return;
-
-      // Listing and picking work today; running the review against the PR head
-      // is the rest of §7 and is not wired yet. Saying so beats starting
-      // something that quietly does nothing.
-      void vscode.window.showInformationMessage(
-        `AgentFlow: #${pr.number} — ${pr.title}. Reviewing a pull request is not wired up yet; ` +
-        'the queue is.',
-      );
+      await startReview(client, pr);
     }),
 
     vscode.commands.registerCommand('agentflow.setJiraCredentials', async () => {
@@ -231,7 +224,10 @@ async function createRun(runsTree: RunsTreeProvider): Promise<void> {
   );
   if (!profile || !client) return;
 
-  const { run } = await client.createRun({ ticketKey: ticketKey.trim(), profile: profile.label });
+  const { run } = await client.createRun({
+    ticketKey: ticketKey.trim(),
+    profile: profile.label as PipelineProfile,
+  });
   await client.startRun(run.id);
   await runsTree.refresh();
   RunDetailPanel.show(run.id, run.ticket.key, client);
@@ -257,6 +253,35 @@ async function pickRun(runId?: string): Promise<Run | undefined> {
  * evidence the agent already gathered attached — §7.2's `alreadyChecked` is
  * how you find out the agent is asking things the repo already answers.
  */
+/**
+ * Start a review run for a pull request (§7).
+ *
+ * The key is `PR-<n>` so every surface that lists runs keeps working; the
+ * pull request itself rides along on the run, which is what the driver reads.
+ */
+async function startReview(
+  client: OrchestratorClient,
+  pr: { number: number; title: string; url?: string; body?: string; author?: string },
+): Promise<void> {
+  const { run } = await client.createRun({
+    ticketKey: `PR-${pr.number}`,
+    summary: pr.title,
+    workflow: 'pr-review',
+    pullRequest: {
+      number: pr.number,
+      title: pr.title,
+      url: pr.url ?? '',
+      ...(pr.body ? { body: pr.body } : {}),
+      ...(pr.author ? { author: pr.author } : {}),
+    },
+  });
+  await client.startRun(run.id);
+  void vscode.window.showInformationMessage(
+    `AgentFlow: reviewing #${pr.number}. Nothing is posted to GitHub — findings come to you at G3.`,
+  );
+  await vscode.commands.executeCommand('agentflow.openDashboard');
+}
+
 async function respond(node: InboxNode | undefined): Promise<void> {
   if (!node || !client) {
     void vscode.window.showInformationMessage('AgentFlow: nothing is waiting on you.');

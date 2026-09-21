@@ -271,7 +271,10 @@ export function transition(
  */
 function advance(s: MachineState, opts: PipelineOptions): TransitionResult {
   const gate = s.step ? GATE_AFTER_STEP[s.step] : undefined;
-  if (gate && !s.gatesPassed.includes(gate)) {
+  // A gate the workflow does not declare is not a gate for this run. The
+  // review pipeline has no spec and no plan, so G1 and G2 would park it in
+  // front of a human with nothing to show them.
+  if (gate && opts.gates.includes(gate) && !s.gatesPassed.includes(gate)) {
     const parked = PARKED_STEP[gate];
     return ok(
       { ...s, ...(parked ? { step: parked } : {}), status: 'waiting_human' },

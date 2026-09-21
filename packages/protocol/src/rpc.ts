@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import {
   ApprovalDecision, ApprovalRequest, HumanGate, PipelineProfile,
-  Question, Run, RunId,
+  Question, Run, RunId, PullRequestRef,
 } from './domain.js';
 import { EnvelopedEvent } from './events.js';
 
@@ -29,6 +29,8 @@ export const HandshakeResult = z.object({
 
 export const CreateRunParams = z.object({
   ticketKey: z.string(),
+  /** Supply this to review a pull request rather than deliver a ticket (§7). */
+  pullRequest: PullRequestRef.optional(),
   summary: z.string().optional(),
   /** Workflow name (§21). Falls back to the configured default. */
   workflow: z.string().optional(),

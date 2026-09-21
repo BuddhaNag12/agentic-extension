@@ -1,5 +1,5 @@
 import {
-  AUTONOMY_GATES, FORBIDDEN_ROLES, MODEL_CATALOGUE, PHASE_OF_STEP,
+  FORBIDDEN_ROLES, MODEL_CATALOGUE, PHASE_OF_STEP, requiredHumanGates,
   type OrgPolicy, type Step, type WorkflowDefinition, type WorkflowIssue,
 } from '@agentflow/protocol';
 import { PHASE_ORDER } from '../fsm/profiles.js';
@@ -89,12 +89,12 @@ export function validateWorkflow(
   }
 
   // W6 — human gates must be a superset of what the autonomy level demands.
-  const requiredHumanGates = AUTONOMY_GATES[policy.maxAutonomy];
-  const missingHuman = requiredHumanGates.filter((g) => !wf.hitl.gates.includes(g));
+  const demanded = requiredHumanGates(policy.maxAutonomy, wf.kind);
+  const missingHuman = demanded.filter((g) => !wf.hitl.gates.includes(g));
   if (missingHuman.length > 0) {
     reject('W6',
-      `org policy autonomy "${policy.maxAutonomy}" requires human gates ${requiredHumanGates.join(', ')}; ` +
-      `missing ${missingHuman.join(', ')}`,
+      `org policy autonomy "${policy.maxAutonomy}" requires human gates ${demanded.join(', ')} ` +
+      `for a ${wf.kind} pipeline; missing ${missingHuman.join(', ')}`,
       'hitl.gates');
   }
 

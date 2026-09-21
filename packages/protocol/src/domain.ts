@@ -113,6 +113,24 @@ export const TicketRef = z.object({
 });
 export type TicketRef = z.infer<typeof TicketRef>;
 
+/**
+ * The pull request a review run is about (§3.1, §7.2).
+ *
+ * Alongside `ticket` rather than replacing it: a review run still needs a key
+ * and a title for every surface that shows runs, and `PR-118` satisfies
+ * `TicketKey` without a union rippling through the codebase.
+ */
+export const PullRequestRef = z.object({
+  number: z.number().int().positive(),
+  title: z.string(),
+  url: z.string(),
+  author: z.string().optional(),
+  headSha: z.string().optional(),
+  /** The PR description — what it *claims* to do (§7.4). */
+  body: z.string().optional(),
+});
+export type PullRequestRef = z.infer<typeof PullRequestRef>;
+
 export const RepoRef = z.object({
   id: RepoId,
   path: z.string(),
@@ -254,6 +272,8 @@ export const Run = z.object({
   branch: z.string(),
   /** Name of the workflow (§21) that selects this run's phases, gates and agents. */
   workflow: z.string().default('feature'),
+  /** Set when this run reviews a pull request instead of delivering a ticket. */
+  pullRequest: PullRequestRef.optional(),
   phase: Phase,
   /** Absent while a run is queued and nothing inside a phase has started. */
   step: Step.optional(),

@@ -242,6 +242,48 @@ export class WorktreeManager {
   }
 
   /**
+   * A worktree at a pull request's head (§7.2 preflight).
+   *
+   * `refs/pull/N/head` is fetched into a local ref first: a PR branch often
+   * lives on a fork this remote cannot see, and the pull ref is the only
+   * handle that always exists. Detached rather than on a branch, because the
+   * review must not be able to commit — it reads.
+   *
+   * The merge base, not the base tip, is what the diff is against: a PR whose
+   * target moved on since it was opened would otherwise show every unrelated
+   * commit as part of the change.
+   */
+  async createFromPullRequest(input: {
+    number: number;
+    baseRef: string;
+    remote?: string;
+  }): Promise<WorktreeInfo & { mergeBase: string }> {
+    const remote = input.remote ?? 'origin';
+    const key = `PR-${input.number}`;
+    const localRef = `refs/agentflow/pr/${input.number}`;
+
+    await git(this.repoRoot, ['fetch', '--force', remote, `pull/${input.number}/head:${localRef}`]);
+    const headSha = await gitLine(this.repoRoot, ['rev-parse', localRef]);
+    const baseSha = await this.resolveBase(input.baseRef);
+    const mergeBase = await gitLine(this.repoRoot, ['merge-base', baseSha, headSha]);
+
+    const path = this.pathFor(key);
+    if (existsSync(path)) await this.remove(key, true);
+    mkdirSync(dirname(path), { recursive: true });
+    await git(this.repoRoot, ['worktree', 'add', '--detach', path, headSha]);
+    for (const entry of DEFAULT_SHARED_PATHS) this.share(path, entry);
+
+    return {
+      path,
+      branch: `(detached at ${headSha.slice(0, 7)})`,
+      baseRef: input.baseRef,
+      baseSha: mergeBase,
+      headSha,
+      mergeBase,
+    };
+  }
+
+  /**
    * Rebase the run's branch onto its base (§5.8 step 1).
    *
    * A textual conflict aborts and reports, and auto-resolution is never

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { GateId, HumanGate, Phase, Step } from './domain.js';
+import { GateId, HumanGate, Phase, Pipeline, Step } from './domain.js';
 import { AgentRole, Effort, ModelAlias, ThinkingMode } from './models.js';
 
 /**
@@ -83,6 +83,8 @@ export const WorkflowDefinition = z.object({
   /** Inherit from another workflow, then override. Cycles are rejected (W2). */
   extends: WorkflowName.optional(),
   builtIn: z.boolean().default(false),
+  /** Deliver turns a ticket into a branch; review reads a PR (§1.1, §7). */
+  kind: Pipeline.default('deliver'),
   pipeline: WorkflowPipeline.prefault({}),
   /**
    * Passthrough is off: an unknown role must be a loud error. `verifier` in
@@ -120,11 +122,30 @@ export type OrgPolicy = z.infer<typeof OrgPolicy>;
 
 export const DEFAULT_POLICY: OrgPolicy = OrgPolicy.parse({});
 
-/** Which human gates each autonomy level demands. */
+/** Which human gates each autonomy level demands of a deliver pipeline. */
 export const AUTONOMY_GATES: Record<OrgPolicy['maxAutonomy'], HumanGate[]> = {
   gated: ['G1', 'G2', 'G3'],
   supervised: ['G2', 'G3'],
 };
+
+/**
+ * The gates a workflow must declare, given the org's autonomy level and what
+ * kind of pipeline it is.
+ *
+ * A **review** pipeline requires only G3. G1 approves a specification and G2
+ * approves a plan, and a PR review produces neither — there is no artifact for
+ * those gates to be about, so demanding them would make the profile
+ * unexpressible rather than safer. G3 stays mandatory at every autonomy level,
+ * which is what keeps D1's real invariant: no pipeline ends without a human
+ * deciding.
+ */
+export function requiredHumanGates(
+  autonomy: OrgPolicy['maxAutonomy'],
+  kind: Pipeline = 'deliver',
+): HumanGate[] {
+  const base = AUTONOMY_GATES[autonomy];
+  return kind === 'review' ? base.filter((g) => g === 'G3') : base;
+}
 
 export const WorkflowIssue = z.object({
   rule: z.enum(['W1', 'W2', 'W3', 'W4', 'W5', 'W6', 'W7', 'W8']),

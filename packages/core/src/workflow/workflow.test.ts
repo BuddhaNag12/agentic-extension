@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { stringify as toYaml } from 'yaml';
 import { DEFAULT_POLICY, OrgPolicy, PHASE_OF_STEP, WorkflowDefinition, type OrgPolicy as Policy } from '@agentflow/protocol';
-import { STEP_ORDER } from '../fsm/profiles.js';
+import { STEP_ORDER, pipelineOptionsFor, plannedPhases, plannedSteps } from '../fsm/profiles.js';
 import { BUILT_IN_WORKFLOWS } from './builtins.js';
 import { loadWorkflows, seedBuiltIns } from './loader.js';
 import { validateWorkflow } from './validate.js';
@@ -272,5 +272,48 @@ describe('loading and inheritance', () => {
     write('costly', { extends: 'feature', agents: { reviewer: { model: 'fable' } } });
     const { workflows } = loadWorkflows(dir);
     expect(workflows.get('costly')!.runnable).toBe(false);
+  });
+});
+
+describe('the review pipeline (§7)', () => {
+  const prReview = () => BUILT_IN_WORKFLOWS.find((w) => w.name === 'pr-review')!;
+
+  it('is accepted under the strictest autonomy with only G3', () => {
+    // G1 approves a spec and G2 a plan; a PR review produces neither, so
+    // demanding them would make the profile unexpressible rather than safer.
+    expect(validateWorkflow(prReview(), DEFAULT_POLICY, known)).toEqual([]);
+    expect(DEFAULT_POLICY.maxAutonomy).toBe('gated');
+    expect(prReview().hitl.gates).toEqual(['G3']);
+  });
+
+  it('still refuses a review workflow that drops G3', () => {
+    // The invariant that survives: no pipeline ends without a human deciding.
+    const issues = validateWorkflow(
+      wf({ kind: 'review', hitl: { gates: [] }, pipeline: { skip: ['plan', 'build', 'ship'] } }),
+      DEFAULT_POLICY, known,
+    );
+    expect(issues.find((i) => i.rule === 'W6')?.message).toContain('G3');
+  });
+
+  it('still demands all three of a deliver pipeline', () => {
+    const issues = validateWorkflow(
+      wf({ hitl: { gates: ['G3'] } }), DEFAULT_POLICY, known,
+    );
+    expect(issues.find((i) => i.rule === 'W6')?.message).toMatch(/G1/);
+  });
+
+  it('skips plan and build, and drafts no specification', () => {
+    const p = prReview().pipeline;
+    expect(p.skip).toEqual(['plan', 'build', 'ship']);
+    // The change already exists; there is nothing to specify and nobody to ask.
+    expect(p.skipSteps).toContain('draft_spec');
+    expect(p.skipSteps).toContain('questions');
+  });
+
+  it('walks intake → preflight → context → review and stops', () => {
+    const opts = pipelineOptionsFor(prReview());
+    expect(plannedPhases(opts)).toEqual(['intake', 'preflight', 'context', 'review']);
+    expect(plannedSteps(opts)).toContain('harvest');
+    expect(plannedSteps(opts)).not.toContain('implement');
   });
 });

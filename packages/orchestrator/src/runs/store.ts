@@ -8,7 +8,8 @@ import {
   type ReplayState, type Trigger,
 } from '@agentflow/core';
 import type {
-  AttemptBudget, NewRunEvent, PipelineProfile, ResolvedWorkflow, Run, RunEvent,
+  AttemptBudget, NewRunEvent, PipelineProfile, PullRequestRef, ResolvedWorkflow,
+  Run, RunEvent,
 } from '@agentflow/protocol';
 import { runDir, runEventLogPath, runSnapshotPath, type WorkspacePaths } from '../paths.js';
 
@@ -23,6 +24,8 @@ export interface RunHandle {
 
 export interface CreateRunInput {
   ticketKey: string;
+  /** Review a pull request rather than deliver a ticket (§7). */
+  pullRequest?: PullRequestRef;
   summary?: string;
   /** Workflow name (§21). Defaults to `feature`. */
   workflow?: string;
@@ -108,9 +111,14 @@ export class RunStore extends EventEmitter {
 
   create(input: CreateRunInput): RunHandle {
     const id = randomUUID();
-    const workflow = input.workflow ?? DEFAULT_WORKFLOW;
-    const profile = input.profile ?? 'feature';
-    const branch = `agentflow/${input.ticketKey}`;
+    // A pull request picks its own workflow and profile: a review run that
+    // fell through to `feature` would try to plan and build a change that
+    // already exists.
+    const workflow = input.workflow ?? (input.pullRequest ? 'pr-review' : DEFAULT_WORKFLOW);
+    const profile = input.profile ?? (input.pullRequest ? 'pr-review' : 'feature');
+    const branch = input.pullRequest
+      ? `pull/${input.pullRequest.number}/head`
+      : `agentflow/${input.ticketKey}`;
     const now = Date.now();
 
     mkdirSync(runDir(this.paths, id), { recursive: true });
@@ -120,10 +128,11 @@ export class RunStore extends EventEmitter {
       id,
       ticket: {
         key: input.ticketKey,
-        summary: input.summary ?? input.ticketKey,
+        summary: input.summary ?? input.pullRequest?.title ?? input.ticketKey,
         profile,
-        tracker: 'manual',
+        tracker: input.pullRequest ? 'github' : 'manual',
       },
+      ...(input.pullRequest ? { pullRequest: input.pullRequest } : {}),
       repo: {
         id: 'default',
         path: this.paths.root,

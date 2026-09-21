@@ -1,4 +1,6 @@
-import { PHASE_OF_STEP, type Phase, type Step, type WorkflowDefinition } from '@agentflow/protocol';
+import {
+  PHASE_OF_STEP, type HumanGate, type Phase, type Step, type WorkflowDefinition,
+} from '@agentflow/protocol';
 
 /**
  * The linear spine of the pipeline (§5.1). Branching — repair, re-spec,
@@ -48,6 +50,13 @@ export const AUTO_PUSH_STEPS: readonly Step[] = ['push', 'publish', 'notify'] as
 export interface PipelineOptions {
   skip: readonly Phase[];
   skipSteps: readonly Step[];
+  /**
+   * The gates this run actually stops at. The machine used to assume all
+   * three, so a workflow declaring fewer was only prevented from running by
+   * W6 — which left no way to express a pipeline that legitimately has one
+   * (§7's review, where G1 and G2 have no artifact to be about).
+   */
+  gates: readonly HumanGate[];
   waitForCi: boolean;
   /** Set when a blocking question forces `questions` back into a pipeline
    *  whose workflow had skipped it. */
@@ -57,13 +66,14 @@ export interface PipelineOptions {
 }
 
 export const DEFAULT_PIPELINE_OPTIONS: PipelineOptions = {
-  skip: [], skipSteps: [], waitForCi: false,
+  skip: [], skipSteps: [], gates: ['G1', 'G2', 'G3'], waitForCi: false,
 };
 
 export function pipelineOptionsFor(workflow: WorkflowDefinition): PipelineOptions {
   return {
     skip: workflow.pipeline.skip,
     skipSteps: workflow.pipeline.skipSteps,
+    gates: workflow.hitl.gates,
     waitForCi: workflow.pipeline.waitForCi,
   };
 }

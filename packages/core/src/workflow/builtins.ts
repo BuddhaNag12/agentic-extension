@@ -26,6 +26,7 @@ const base = (over: Partial<WorkflowDefinition>): WorkflowDefinition => ({
   description: '',
   schemaVersion: WORKFLOW_SCHEMA_VERSION,
   builtIn: true,
+  kind: 'deliver',
   pipeline: {
     skip: [], skipSteps: [], waitForCi: false,
     gates: { required: STANDARD_GATES, coverageThreshold: 0.8 },
@@ -89,6 +90,28 @@ export const BUILT_IN_WORKFLOWS: WorkflowDefinition[] = [
       gates: { required: [...STANDARD_GATES, 'behaviour_preservation'], coverageThreshold: 0.8 },
     },
     hitl: { gates: ['G1', 'G2', 'G3'], maxQuestionsPerPhase: 0 },
+  }),
+
+  base({
+    name: 'pr-review',
+    displayName: 'PR review',
+    kind: 'review',
+    // §7.2: a PR review skips Plan and Build, and its Context step asks what
+    // the PR *claims* rather than drafting a specification — there is nothing
+    // to specify, the change already exists.
+    //
+    // Only G3, and that is not a relaxation: G1 approves a spec and G2 a plan,
+    // and this pipeline produces neither, so demanding them would make the
+    // profile unexpressible rather than safer (§7 and DECISIONS D68).
+    description: 'Review an inbound pull request. Reads the diff, runs the gates, posts nothing.',
+    pipeline: {
+      skip: ['plan', 'build', 'ship'],
+      skipSteps: ['draft_spec', 'questions'],
+      waitForCi: false,
+      gates: { required: STANDARD_GATES, coverageThreshold: 0.8 },
+    },
+    hitl: { gates: ['G3'], maxQuestionsPerPhase: 0 },
+    budgets: { perRunUsd: 3, perTicketMinutes: 30, attemptsPerTask: 1, attemptsPerRun: 1 },
   }),
 
   base({

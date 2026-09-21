@@ -9,7 +9,7 @@ import {
   Methods, Notifications, PROTOCOL_VERSION,
   type EnvelopedEvent, type HandshakeResult, type ListLabelsParams, type ListLabelsResult,
   type ListPullRequestsParams, type ListPullRequestsResult,
-  type PendingChangedNotification, type RefreshInboxParams, type Run,
+  type CreateRunParams, type PendingChangedNotification, type RefreshInboxParams, type Run,
   type WorkInboxSnapshot,
 } from '@agentflow/protocol';
 import { readLiveLock, workspacePaths } from '@agentflow/orchestrator';
@@ -140,7 +140,7 @@ export class OrchestratorClient extends EventEmitter {
     return this.request(Methods.listRuns, {});
   }
 
-  createRun(params: { ticketKey: string; summary?: string; profile?: string }): Promise<{ run: Run }> {
+  createRun(params: CreateRunParams): Promise<{ run: Run }> {
     return this.request(Methods.createRun, params);
   }
 

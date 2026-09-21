@@ -110,7 +110,7 @@ exercised deterministically and for free.
   card with the branch, commit list, diffstat, gate summary, the acceptance
   criteria as a manual checklist, and the `git push` to run yourself
 
-- 416 tests: state machine, replay (including a property test), the schema
+- 424 tests: state machine, replay (including a property test), the schema
   2.0.0 log migration, failure signatures, concurrency, workflow validation,
   real git worktrees and rebases, real gate execution, a ship integration test
   that asserts nothing reaches `origin`, and a daemon integration test over the
@@ -141,10 +141,15 @@ exercised deterministically and for free.
   the untriaged pile. Read-only, on `fetch` with no new dependency; the token
   comes from `SecretStorage`, an environment variable, or `gh`
 
-Not yet real: running a review *against* a PR (the queue is there; §7's
-worktree-at-head, claim conformance and merge-base gate run are not), §5.7's
-four narrow passes (this is one), the eval harness, the rest of the Work Inbox
-(§6), and Jira/Figma.
+- **PR review** (§7) — pick a pull request and get a real review: a detached
+  worktree at `pull/N/head`, the diff against the **merge base**, the gate
+  ladder actually run on the head, and claim conformance (does the PR do what
+  its description says?). Findings come to you at G3. **Nothing is ever posted
+  to GitHub** — the module has no write method
+
+Not yet real: §7.3's merge-base gate delta (a red gate is reported, not
+excused), publishing findings as a GitHub review, §5.7's four narrow passes
+(this is one), the eval harness, Jira write-back, and Figma.
 
 ## Layout
 
@@ -178,7 +183,7 @@ Everything else is a separate script, each independently runnable:
 |---|---|
 | `npm run build` | Compiles all packages, then bundles the extension and the daemon |
 | `npm run typecheck` | `tsc -b` across every package; no emit |
-| `npm test` | 416 tests (`npm run test:watch` to iterate) |
+| `npm test` | 424 tests (`npm run test:watch` to iterate) |
 | `npm run package` | Produces `agentflow.vsix` (`--skip-license`; see below) |
 | `npm run clean` | Removes `dist/` and build info |
 

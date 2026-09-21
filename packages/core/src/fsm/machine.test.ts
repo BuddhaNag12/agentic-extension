@@ -346,3 +346,41 @@ describe('blocked and resume', () => {
     expect(transition(s, { kind: 'resume' }, feature).ok).toBe(false);
   });
 });
+
+describe('a pipeline that declares fewer gates (§7)', () => {
+  const review = optionsFor('pr-review');
+
+  it('does not park at a gate the workflow never declared', () => {
+    // The machine used to assume all three, so a review run would have stopped
+    // at G1 to show a human a specification that does not exist.
+    let s = initialState();
+    for (let i = 0; i < 20 && s.status !== 'waiting_human'; i += 1) {
+      s = drive(s, [s.step === 'auto_review' ? { kind: 'review_findings', blocking: 0 } : advance], review);
+    }
+    expect(s.status).toBe('waiting_human');
+    expect(s.step).toBe('human_review');
+    expect(s.gatesPassed).toEqual([]);
+  });
+
+  it('still ends at G3 — no pipeline finishes without a human', () => {
+    let s = initialState();
+    for (let i = 0; i < 20 && s.status !== 'waiting_human'; i += 1) {
+      s = drive(s, [s.step === 'auto_review' ? { kind: 'review_findings', blocking: 0 } : advance], review);
+    }
+    const done = drive(s, [approve('G3')], review);
+    expect(done.status).toBe('succeeded');
+    expect(done.gatesPassed).toEqual(['G3']);
+  });
+
+  it('never reaches build or ship', () => {
+    const visited: string[] = [];
+    let s = initialState();
+    for (let i = 0; i < 20 && s.status !== 'waiting_human'; i += 1) {
+      s = drive(s, [s.step === 'auto_review' ? { kind: 'review_findings', blocking: 0 } : advance], review);
+      visited.push(s.phase);
+    }
+    expect(visited).not.toContain('build');
+    expect(visited).not.toContain('ship');
+    expect(visited).toContain('context');
+  });
+});

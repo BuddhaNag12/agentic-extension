@@ -184,6 +184,26 @@ export class RealRunDriver {
 
       case 'worktree': {
         const tree = new WorktreeManager(this.paths.root);
+
+        // §7.2: a review run checks out the pull request's head rather than
+        // branching from the base. The diff is against the *merge base*, so a
+        // target branch that moved on does not show as part of the change.
+        const pr = handle.run.pullRequest;
+        if (pr) {
+          say(`fetching pull/${pr.number}/head`);
+          const info = await tree.createFromPullRequest({
+            number: pr.number,
+            baseRef: handle.run.repo.baseRef,
+          });
+          this.artifacts.set(runId, { ...state, worktree: info.path, baseSha: info.mergeBase });
+          this.store.emitEvent(handle, {
+            t: 'checkpoint',
+            label: `PR #${pr.number} at ${info.headSha.slice(0, 7)}, merge base ${info.mergeBase.slice(0, 7)}`,
+            commitSha: info.headSha,
+          });
+          return this.step(runId, { kind: 'advance' });
+        }
+
         say(`preparing an isolated worktree for ${handle.run.ticket.key}`);
         const info = await tree.create({
           ticketKey: handle.run.ticket.key,
@@ -270,7 +290,13 @@ export class RealRunDriver {
         if (baseline.length > 0) {
           this.store.emitEvent(handle, {
             t: 'log', level: 'warn',
-            message: `baseline already failing: ${baseline.join(', ')} — excluded from the blocking set`,
+            message: handle.run.pullRequest
+              // §7.3's differentiator: the gates really ran on the PR head, so
+              // a finding carries a stack trace. Whether the failure predates
+              // the PR needs a second run on the merge base, which is not done
+              // yet — so it is reported, not excused.
+              ? `red on the PR head: ${baseline.join(', ')} — may or may not predate the PR`
+              : `baseline already failing: ${baseline.join(', ')} — excluded from the blocking set`,
           });
         }
         this.artifacts.set(runId, { ...state, baselineFailures: baseline });
@@ -282,7 +308,9 @@ export class RealRunDriver {
         if (!state.worktree) return this.block(runId, 'no worktree: preflight did not complete');
         const r = await runHarvest(this.provider, {
           ticketKey: handle.run.ticket.key,
-          ticketDescription: handle.run.ticket.summary,
+          ticketDescription: handle.run.pullRequest
+            ? `${handle.run.pullRequest.title}\n\n${handle.run.pullRequest.body ?? ''}`
+            : handle.run.ticket.summary,
           worktree: state.worktree!,
           workflow,
         }, stream);
@@ -571,10 +599,12 @@ export class RealRunDriver {
           return this.block(runId, 'there is no diff to review');
         }
 
+        const pr = handle.run.pullRequest;
         const r = await runReview(this.provider, {
-          ticketKey: handle.run.ticket.key,
+          ticketKey: pr ? `#${pr.number}` : handle.run.ticket.key,
           spec: state.spec,
           plan: state.plan,
+          ...(pr ? { claim: { title: pr.title, body: pr.body ?? '' } } : {}),
           diff: patch,
           diffTruncated: truncated,
           changedFiles: (await tree.changedFiles(state.worktree, state.baseSha)).map((c) => c.path),
@@ -624,6 +654,13 @@ export class RealRunDriver {
         // nothing else closes it: a reviewer that keeps finding the same
         // blocker would otherwise loop until the wall clock or the card did.
         // Past the limit the human decides, which is what G3 is for anyway.
+        // A review pipeline has no build to send findings back to — the
+        // change is someone else's. Everything goes to the human at G3.
+        if (handle.run.pullRequest) {
+          say(`${r.blocking} blocking, ${(r.report?.findings.length ?? 0) - r.blocking} advisory — nothing has been posted to GitHub (§7.5)`);
+          return this.step(runId, { kind: 'review_findings', blocking: 0 });
+        }
+
         const round = (state.reviewRounds ?? 0) + 1;
         if (r.blocking > 0 && round > REVIEW_ROUND_LIMIT) {
           this.store.emitEvent(handle, {

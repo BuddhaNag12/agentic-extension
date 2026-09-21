@@ -987,3 +987,53 @@ Two things, both only visible on screen:
   edge** entirely — present in the DOM, unreachable. The row wraps now, and a
   check that every action's bounding box lies inside the viewport is what
   confirmed it rather than a glance.
+
+## Decisions made wiring the PR review pipeline
+
+### D68 — Autonomy is pipeline-aware; a review pipeline requires only G3
+
+The blocker that held §7 for three sessions. `AUTONOMY_GATES` demanded G1, G2
+and G3 of every workflow under the default `gated` policy, so W6 rejected a
+`pr-review` profile outright — and the profile could not honestly declare
+those gates, because **G1 approves a specification and G2 approves a plan, and
+a PR review produces neither**. There is no artifact for them to be about.
+Demanding them would not have made anything safer; it made the profile
+unexpressible.
+
+`requiredHumanGates(autonomy, kind)` filters to G3 for a review pipeline. G3
+stays mandatory at every autonomy level, which preserves what D1 was actually
+protecting: no pipeline ends without a human deciding. A review workflow that
+drops G3 is still rejected.
+
+### D69 — The machine honours the workflow's gate set
+
+Related and necessary: `advance` consulted `GATE_AFTER_STEP` alone, so it
+would have parked a review run at G1 regardless of what the workflow declared.
+All three gates were hardcoded into the state machine, and W6 was the only
+thing stopping a workflow from disagreeing with it.
+
+`PipelineOptions.gates` now carries the declared set and `advance` checks
+membership. The policy decides what a workflow *may* declare; the workflow
+decides what the run *does*. Those were the same thing only because nothing
+had ever needed them to differ.
+
+### D70 — The diff is against the merge base, and nothing is posted
+
+Two things §7 is specific about, both enforced here rather than trusted:
+
+- The worktree is created from `refs/pull/N/head` — a PR branch often lives on
+  a fork the remote cannot see, and the pull ref is the only handle that always
+  exists — and **detached**, so the review cannot commit. The diff is taken
+  against `merge-base(base, head)`, not the base tip: a target branch that
+  moved on since the PR opened would otherwise show every unrelated commit as
+  part of the change.
+- Blocking findings do **not** route back to build. A review pipeline has no
+  build — the change is someone else's — so everything goes to the human at
+  G3, and the run says in as many words that nothing was posted to GitHub.
+
+The gate ladder really runs on the PR head, which is §7.3's differentiator: a
+finding that says a test fails carries a stack trace. What is *not* done is
+§7.3's second half — running the ladder on the merge base too and reporting
+only the delta — so a red gate is reported as "may or may not predate the PR"
+rather than excused. Claiming it was pre-existing without checking would be
+the false negative equivalent of the false green.

@@ -59,6 +59,11 @@ export interface ReviewInput {
   gateReports: readonly GateReport[];
   worktree: string;
   workflow: ResolvedWorkflow;
+  /**
+   * What a pull request *claims* to do — its title and description (§7.4).
+   * Present only for a review pipeline; a deliver run has a spec instead.
+   */
+  claim?: { title: string; body: string } | undefined;
   /** Set on the second pass; see `adversarialReview`. */
   adversarial?: boolean;
 }
@@ -139,6 +144,20 @@ either — a blocker filed as a nit is how a bad change merges.
 Return JSON matching the schema you were given. Nothing else.
 `.trim();
 
+/** §7.4, the pass unique to reviewing someone else's pull request. */
+const CLAIM_CONFORMANCE = `
+This is an inbound pull request, so there is no specification — what it claims
+is its title and description. Check the claim against the diff:
+
+- Something the description promises that the diff does not contain.
+- Substantive changes the description does not mention. Scale the severity by
+  risk: a refactor buried in a bugfix PR is exactly what you are here to catch.
+- Unrelated churn — formatting, IDE config, version bumps — grouped into **one**
+  \`nit\`, never one per file.
+
+File these as \`conformance\`.
+`.trim();
+
 const ADVERSARIAL = `
 A first pass over this diff returned **no findings at all**, on a change large
 enough that this is unlikely.
@@ -211,7 +230,8 @@ async function onePass(
   const prompt = composePrompt({
     role: 'reviewer',
     workflow: input.workflow,
-    phaseBrief: input.adversarial ? `${BRIEF}\n\n${ADVERSARIAL}` : BRIEF,
+    phaseBrief: [BRIEF, input.claim ? CLAIM_CONFORMANCE : '', input.adversarial ? ADVERSARIAL : '']
+      .filter(Boolean).join('\n\n'),
     gates: input.gateReports.map((g) => g.gate),
     // Read-only: an empty allowlist puts the session in plan mode, so the
     // reviewer cannot "helpfully" fix what it finds. A reviewer that edits is
@@ -272,12 +292,19 @@ async function onePass(
 }
 
 function reviewPrompt(input: ReviewInput, unplanned: readonly string[]): string {
-  const lines = [
-    `# Review ${input.ticketKey}`,
-    '',
-    '## What was asked for',
-    input.spec?.problem ?? '(no specification was recorded)',
-  ];
+  const lines = [`# Review ${input.ticketKey}`, ''];
+
+  if (input.claim) {
+    lines.push(
+      '## What this pull request claims to do',
+      `**${input.claim.title}**`,
+      '',
+      input.claim.body.trim() || '_The description is empty._',
+      '',
+    );
+  } else {
+    lines.push('## What was asked for', input.spec?.problem ?? '(no specification was recorded)');
+  }
 
   if (input.spec?.acceptanceCriteria.length) {
     lines.push('', '### Acceptance criteria',
@@ -311,6 +338,8 @@ function reviewPrompt(input: ReviewInput, unplanned: readonly string[]): string 
     lines.push('_Truncated — review what is here and say in your summary that you did not see all of it._');
   }
   lines.push('```diff', input.diff, '```');
-  lines.push('', input.adversarial ? `${BRIEF}\n\n${ADVERSARIAL}` : BRIEF);
+  lines.push('', BRIEF);
+  if (input.claim) lines.push('', CLAIM_CONFORMANCE);
+  if (input.adversarial) lines.push('', ADVERSARIAL);
   return lines.join('\n');
 }
