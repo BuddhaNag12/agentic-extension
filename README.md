@@ -174,8 +174,13 @@ Everything else is a separate script, each independently runnable:
 | `npm run build` | Compiles all packages, then bundles the extension and the daemon |
 | `npm run typecheck` | `tsc -b` across every package; no emit |
 | `npm test` | 396 tests (`npm run test:watch` to iterate) |
-| `npm run package` | Produces `agentflow.vsix` |
+| `npm run package` | Produces `agentflow.vsix` (`--skip-license`; see below) |
 | `npm run clean` | Removes `dist/` and build info |
+
+The repo has no `LICENSE`, so `vsce` would stop and ask before packaging —
+which makes the command interactive and unscriptable. `--skip-license` passes
+it. **Add a `LICENSE` before publishing**: the Marketplace shows one, and its
+absence is the first thing anyone evaluating the extension will notice.
 
 Node 20+ and git are the only prerequisites. Use **npm**, not yarn — the repo
 has a `package-lock.json` and no `yarn.lock`, and two lockfiles drift.
