@@ -35,6 +35,23 @@ export class OrchestratorClient extends EventEmitter {
     this.setMaxListeners(64);
   }
 
+  /**
+   * Logging must never throw. VS Code disposes output channels during
+   * extension-host teardown in registration order, which can put ours in the
+   * ground before this client's `dispose()` runs — so a socket error arriving
+   * in that window turns a routine disconnect into "Channel has been closed"
+   * in the host log, an error that reads as AgentFlow failing when it is only
+   * AgentFlow reporting.
+   */
+  private safeLog(message: string): void {
+    if (this.disposed) return;
+    try {
+      this.log(message);
+    } catch {
+      // The channel is gone; there is nowhere left to say so.
+    }
+  }
+
   get connected(): boolean {
     return this.connection !== undefined;
   }
@@ -63,14 +80,14 @@ export class OrchestratorClient extends EventEmitter {
     const stale = lock !== undefined && mine !== undefined && lock.entryMtimeMs !== mine;
 
     if (stale) {
-      this.log('the running orchestrator is from an older build; restarting it');
+      this.safeLog('the running orchestrator is from an older build; restarting it');
       await this.shutdownDaemon();
       this.disposed = false;
     }
 
     let endpoint = stale ? undefined : lock?.endpoint;
     if (endpoint) {
-      this.log(`attaching to existing orchestrator at ${endpoint}`);
+      this.safeLog(`attaching to existing orchestrator at ${endpoint}`);
     } else {
       endpoint = await this.spawnDaemon(paths.lockFile);
     }
@@ -86,7 +103,10 @@ export class OrchestratorClient extends EventEmitter {
     this.connection.onNotification(Notifications.pendingChanged, (p: PendingChangedNotification) => this.emit('pendingChanged', p));
     this.connection.onNotification(Notifications.workInboxChanged, (p: WorkInboxSnapshot) => this.emit('workInboxChanged', p));
     this.connection.onClose(() => this.handleDrop());
-    this.socket.on('error', (err) => this.log(`socket error: ${err.message}`));
+    // Without this, a write that loses its socket mid-flight — every
+    // window reload — escapes as an unhandled EPIPE.
+    this.connection.onError(([err]) => this.safeLog(`rpc error: ${err.message}`));
+    this.socket.on('error', (err) => this.safeLog(`socket error: ${err.message}`));
     this.connection.listen();
 
     const result = await this.connection.sendRequest<HandshakeResult>(Methods.handshake, {
@@ -94,7 +114,7 @@ export class OrchestratorClient extends EventEmitter {
       workspaceRoot: this.workspaceRoot,
       clientId: `vscode-${process.pid}`,
     });
-    this.log(`connected to orchestrator ${result.orchestratorVersion} (pid ${result.pid})`);
+    this.safeLog(`connected to orchestrator ${result.orchestratorVersion} (pid ${result.pid})`);
     this.emit('connected', result);
   }
 
@@ -103,7 +123,7 @@ export class OrchestratorClient extends EventEmitter {
    * line reports the endpoint it bound.
    */
   private spawnDaemon(lockFile: string): Promise<string> {
-    this.log('spawning orchestrator daemon');
+    this.safeLog('spawning orchestrator daemon');
     return new Promise<string>((resolve, reject) => {
       const child = spawn(process.execPath, [this.daemonEntry, '--workspace', this.workspaceRoot], {
         detached: true,
@@ -127,11 +147,11 @@ export class OrchestratorClient extends EventEmitter {
             // Lost a spawn race with another window: use the winner's endpoint.
             if (msg.status === 'already-running' && msg.endpoint) return finish(msg.endpoint);
           } catch {
-            this.log(`orchestrator: ${line}`);
+            this.safeLog(`orchestrator: ${line}`);
           }
         }
       });
-      child.stderr?.on('data', (c: Buffer) => this.log(c.toString('utf8').trimEnd()));
+      child.stderr?.on('data', (c: Buffer) => this.safeLog(c.toString('utf8').trimEnd()));
       child.on('error', (err) => { clearTimeout(timer); reject(err); });
       child.on('exit', (code) => {
         const lock = readLiveLock(lockFile);
@@ -144,7 +164,7 @@ export class OrchestratorClient extends EventEmitter {
 
   private handleDrop(): void {
     if (this.disposed) return;
-    this.log('orchestrator connection closed');
+    this.safeLog('orchestrator connection closed');
     this.connection = undefined;
     this.socket = undefined;
     this.emit('disconnected');
@@ -202,6 +222,11 @@ export class OrchestratorClient extends EventEmitter {
 
   dispose(): void {
     this.disposed = true;
+    // A socket torn down underneath us emits one last error. Our own handler
+    // must go first, and a no-op has to replace it: an 'error' with no
+    // listener is a throw in Node, not a warning.
+    this.socket?.removeAllListeners('error');
+    this.socket?.on('error', () => {});
     // The daemon deliberately keeps running: a reload must not kill a run.
     this.connection?.dispose();
     this.socket?.destroy();
@@ -238,7 +263,7 @@ export class OrchestratorClient extends EventEmitter {
       connection.dispose();
       socket.destroy();
     } catch (err) {
-      this.log(`shutdown request did not complete: ${err instanceof Error ? err.message : String(err)}`);
+      this.safeLog(`shutdown request did not complete: ${err instanceof Error ? err.message : String(err)}`);
     }
     this.dispose();
 
