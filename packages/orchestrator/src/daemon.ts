@@ -1,5 +1,6 @@
 import { createServer, type Server, type Socket } from 'node:net';
-import { existsSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { totalmem } from 'node:os';
 import {
   createMessageConnection, SocketMessageReader, SocketMessageWriter,
@@ -455,6 +456,40 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+const MAX_LOG_BYTES = 2_000_000;
+let logFile: string | undefined;
+
+/**
+ * Send the daemon's log to a file instead of stderr.
+ *
+ * stderr is a pipe owned by the extension host that spawned us, and that host
+ * exits on every window reload. A detached daemon outliving its parent is the
+ * whole point (§2.2), so its log cannot live in the parent's pipe — and until
+ * it didn't, there was no record anywhere of why a daemon stopped.
+ */
+export function setLogFile(path: string): void {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    // Unbounded across a machine's lifetime otherwise; one generation back is
+    // enough to cover the reload that killed the daemon you are looking into.
+    if ((statSync(path, { throwIfNoEntry: false })?.size ?? 0) > MAX_LOG_BYTES) {
+      renameSync(path, `${path}.old`);
+    }
+  } catch {
+    // A log we cannot rotate is still a log worth writing to.
+  }
+  logFile = path;
+}
+
 function log(message: string): void {
-  process.stderr.write(`[agentflow] ${message}\n`);
+  const line = `[agentflow] ${new Date().toISOString()} ${message}\n`;
+  if (logFile) {
+    try {
+      appendFileSync(logFile, line);
+      return;
+    } catch {
+      // Fall back to stderr rather than losing the line entirely.
+    }
+  }
+  process.stderr.write(line);
 }

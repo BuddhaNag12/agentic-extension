@@ -11,6 +11,7 @@ export interface WorkspacePaths {
   root: string;
   agentflowDir: string;
   lockFile: string;
+  daemonLogFile: string;
   runsDir: string;
   ipcEndpoint: string;
 }
@@ -22,6 +23,7 @@ export function workspacePaths(root: string): WorkspacePaths {
     root,
     agentflowDir,
     lockFile: join(agentflowDir, 'orchestrator.lock'),
+    daemonLogFile: join(agentflowDir, 'orchestrator.log'),
     runsDir: join(agentflowDir, 'runs'),
     // Windows named pipes live in a reserved namespace; unix sockets go to a
     // temp dir because the 104-byte sun_path limit rules out deep repo paths.
