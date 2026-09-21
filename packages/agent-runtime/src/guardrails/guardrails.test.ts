@@ -69,6 +69,29 @@ describe('path policy', () => {
     expect(checkWritePath({ ...policy, allowDependencyChanges: true }, 'package.json').ok).toBe(true);
   });
 
+  it('allows read-only git aimed at another directory', () => {
+    // `git -C <worktree> ...` is the natural shape inside a worktree, and
+    // matching literal prefixes missed every one of them — a live harvest run
+    // burned its exploration budget on refusals and predicted nothing.
+    for (const cmd of [
+      'git -C /Users/me/wt status',
+      'git -C /Users/me/wt log --oneline -20',
+      'git -C "/Users/me/my wt" diff HEAD~1',
+      'git --no-pager log -5',
+      'git -C /Users/me/wt --no-pager show HEAD',
+    ]) {
+      expect(checkBash(cmd), cmd).toMatchObject({ decision: 'allow' });
+    }
+  });
+
+  it('does not let -C smuggle a mutating subcommand through', () => {
+    // The rewrite is for prefix matching only; the deny rules still see the
+    // real command.
+    expect(checkBash('git -C /tmp/x push --force')).toMatchObject({ decision: 'deny' });
+    expect(checkBash('git -C /tmp/x reset --hard')).toMatchObject({ decision: 'deny' });
+    expect(checkBash('git -C /tmp/x rm -rf .')).not.toMatchObject({ decision: 'allow' });
+  });
+
   it('enforces an allowlist when the task predicts a touch set', () => {
     const scoped = { ...policy, allowedPaths: ['src/checkout/**'] };
     expect(checkWritePath(scoped, 'src/checkout/Cart.ts').ok).toBe(true);

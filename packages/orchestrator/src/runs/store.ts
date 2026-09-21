@@ -27,6 +27,13 @@ export interface CreateRunInput {
   /** Review a pull request rather than deliver a ticket (§7). */
   pullRequest?: PullRequestRef;
   summary?: string;
+  /** The ticket body, for harvest. */
+  description?: string;
+  /**
+   * The repository this run targets, already resolved. Defaults to the
+   * workspace, which is what every run used to get unconditionally.
+   */
+  repo?: { id: string; path: string; baseBranch: string };
   /** Workflow name (§21). Defaults to `feature`. */
   workflow?: string;
   profile?: PipelineProfile;
@@ -65,12 +72,12 @@ export class RunStore extends EventEmitter {
   constructor(private readonly paths: WorkspacePaths) {
     super();
     this.setMaxListeners(64);
-    this.loaded = loadWorkflows(paths.agentflowDir);
+    this.loaded = loadWorkflows(paths.configDir, false);
   }
 
   /** Re-read `.agentflow/workflows` — called when a definition changes on disk. */
   reloadWorkflows(): LoadResult {
-    this.loaded = loadWorkflows(this.paths.agentflowDir);
+    this.loaded = loadWorkflows(this.paths.configDir, false);
     this.emit('workflowsChanged');
     return this.loaded;
   }
@@ -129,18 +136,22 @@ export class RunStore extends EventEmitter {
       ticket: {
         key: input.ticketKey,
         summary: input.summary ?? input.pullRequest?.title ?? input.ticketKey,
+        ...(input.description ? { description: input.description } : {}),
         profile,
         tracker: input.pullRequest ? 'github' : 'manual',
       },
       ...(input.pullRequest ? { pullRequest: input.pullRequest } : {}),
       repo: {
-        id: 'default',
-        path: this.paths.root,
-        baseRef: input.baseRef ?? 'origin/main',
+        id: input.repo?.id ?? 'default',
+        path: input.repo?.path ?? this.paths.root,
+        baseRef: input.baseRef ?? `origin/${input.repo?.baseBranch ?? 'main'}`,
       },
       // §20.2: worktrees live in a sibling directory, not inside the repo —
       // nested worktrees confuse build tooling that resolves from the root.
-      worktree: `${this.paths.root}-agentflow/${input.ticketKey}`,
+      // Sibling of the repo it came from, not of the workspace — §20.2's rule
+      // is about the repo, and a run targeting another repo must not put its
+      // tree next to this one.
+      worktree: `${input.repo?.path ?? this.paths.root}-agentflow/${input.ticketKey}`,
       branch,
       workflow,
       phase: 'intake',

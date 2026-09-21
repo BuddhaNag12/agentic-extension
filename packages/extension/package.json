@@ -159,6 +159,18 @@
           "default": true,
           "description": "Open the AgentFlow dashboard in an editor tab when the orchestrator connects."
         },
+        "agentflow.inbox.pullRequests": {
+          "type": "string",
+          "enum": ["involves", "review-requested", "authored", "all"],
+          "enumDescriptions": [
+            "Pull requests you opened, were assigned, were mentioned on, or commented on.",
+            "Only pull requests whose review was requested from you — never matches your own.",
+            "Only pull requests you opened.",
+            "Every open pull request in the repository."
+          ],
+          "default": "involves",
+          "description": "Which pull requests appear in the AgentFlow work inbox."
+        },
         "agentflow.ui.openDashboardOnClick": {
           "type": "boolean",
           "default": true,

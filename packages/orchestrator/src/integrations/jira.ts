@@ -17,11 +17,24 @@ export interface JiraConfig {
   token: string;
 }
 
+/**
+ * Jira's own three-way bucketing of any status (§6.1 tabs).
+ *
+ * Keyed on `statusCategory`, never on `status.name`: names are per-project
+ * and renamed freely — "In Dev", "Code Review", "Selected for Development"
+ * are all the same category — so matching on them breaks on the next board.
+ */
+export type StatusCategory = 'new' | 'indeterminate' | 'done' | 'unknown';
+
 export interface JiraIssue {
   key: string;
   summary: string;
   url: string;
   status: string;
+  /** Which of the three buckets `status` falls in. */
+  statusCategory: StatusCategory;
+  /** The ticket body, flattened out of ADF. What harvest actually reads. */
+  description: string;
   issueType: string;
   priority: string | undefined;
   labels: string[];
@@ -49,9 +62,20 @@ export type JiraFetcher = (
   text: () => Promise<string>;
 }>;
 
-/** Unresolved work assigned to whoever the token belongs to. */
+/**
+ * How far back resolved work is worth showing.
+ *
+ * `resolution = Unresolved` alone cannot populate a Done tab, and dropping it
+ * outright pulls an entire ticket history into a 200-item cap that then
+ * truncates by `updated` — silently hiding current work behind tickets closed
+ * years ago. A window keeps Done meaningful and the list bounded.
+ */
+export const RESOLVED_WINDOW_DAYS = 14;
+
+/** Work assigned to whoever the token belongs to: open, plus recently closed. */
 export const MY_OPEN_ISSUES_JQL =
-  'assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC';
+  'assignee = currentUser() AND (resolution = Unresolved OR resolved >= ' +
+  `-${RESOLVED_WINDOW_DAYS}d) ORDER BY updated DESC`;
 
 export class JiraClient {
   constructor(
@@ -62,7 +86,7 @@ export class JiraClient {
   /** Issues matching a JQL query. Capped — §6.4: 500 results is a broken query. */
   async search(jql = MY_OPEN_ISSUES_JQL, limit = 50): Promise<JiraIssue[]> {
     const host = this.config.host.replace(/\/+$/, '');
-    const fields = 'summary,status,issuetype,priority,labels,assignee,updated';
+    const fields = 'summary,description,status,issuetype,priority,labels,assignee,updated';
     const url =
       `${host}/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}` +
       `&maxResults=${Math.min(limit, 100)}&fields=${fields}`;
@@ -127,6 +151,8 @@ export class JiraClient {
       summary: String(f['summary'] ?? ''),
       url: `${host}/browse/${key}`,
       status: named(f['status']) ?? 'unknown',
+      statusCategory: categoryOf(f['status']),
+      description: plainText(f['description']),
       issueType: named(f['issuetype']) ?? 'unknown',
       priority: named(f['priority']),
       labels: Array.isArray(f['labels']) ? f['labels'].filter((l): l is string => typeof l === 'string') : [],
@@ -134,6 +160,50 @@ export class JiraClient {
       updatedAt: String(f['updated'] ?? ''),
     };
   }
+}
+
+/**
+ * The status category, from the `status` field we already request — no extra
+ * API call and no extra field. Anything unrecognised is `unknown` rather than
+ * being forced into a bucket, so a surprising payload shows up as itself.
+ */
+/**
+ * A Jira description as prose.
+ *
+ * The v3 API returns ADF — a nested JSON document, not a string — and the
+ * whole point of fetching it is that harvest reads it: handing the phase
+ * `[object Object]` is worse than handing it nothing, because it looks like
+ * content. Older instances and some fields still return a plain string, so
+ * both shapes are accepted.
+ */
+export function plainText(v: unknown): string {
+  return adf(v).replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** Blocks each start a line; inline marks run together. */
+const ADF_BLOCK = new Set([
+  'doc', 'bulletList', 'orderedList', 'listItem', 'table', 'tableRow', 'tableCell',
+  'blockquote', 'panel', 'paragraph', 'heading', 'codeBlock',
+]);
+
+function adf(v: unknown): string {
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v)) return v.map(adf).join('');
+  if (!v || typeof v !== 'object') return '';
+  const node = v as { type?: unknown; text?: unknown; content?: unknown };
+  if (typeof node.text === 'string') return node.text;
+  if (node.type === 'hardBreak') return '\n';
+  const kids = Array.isArray(node.content) ? node.content.map(adf) : [];
+  const joined = kids.join('');
+  // Blocks nest — a listItem wraps a paragraph — so only break when the
+  // content did not already end in one, or every list comes out double spaced.
+  const block = ADF_BLOCK.has(String(node.type));
+  return block && joined && !joined.endsWith('\n') ? joined + '\n' : joined;
+}
+
+function categoryOf(status: unknown): StatusCategory {
+  const cat = (status as { statusCategory?: { key?: unknown } } | null)?.statusCategory?.key;
+  return cat === 'new' || cat === 'indeterminate' || cat === 'done' ? cat : 'unknown';
 }
 
 function describe(status: number, detail: string): string {

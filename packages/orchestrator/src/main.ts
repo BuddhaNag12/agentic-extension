@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { Orchestrator, setLogFile } from './daemon.js';
+import { mkdirSync } from 'node:fs';
+import { Orchestrator, log, setLogFile } from './daemon.js';
 import { readLiveLock } from './lock.js';
-import { workspacePaths } from './paths.js';
+import { migrateLegacyState, workspacePaths } from './paths.js';
 
 /**
  * Daemon entry point. Spawned lazily by the extension on first use and left
@@ -27,7 +28,13 @@ async function main(): Promise<void> {
   }
 
   const paths = workspacePaths(root);
+  // Before the log file is opened: it now lives in the state dir, which may
+  // not exist yet on a workspace upgraded from a build that wrote into the
+  // repository.
+  mkdirSync(paths.stateDir, { recursive: true });
+  const moved = migrateLegacyState(paths);
   setLogFile(paths.daemonLogFile);
+  if (moved.length) log(`moved ${moved.join(' and ')} out of the repository into ${paths.stateDir}`);
 
   // Losing a spawn race is normal: two windows opening at once both try. The
   // loser exits quietly and its client attaches to the winner's endpoint.

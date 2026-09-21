@@ -107,6 +107,11 @@ export type ArtifactRef = z.infer<typeof ArtifactRef>;
 export const TicketRef = z.object({
   key: TicketKey,
   summary: z.string(),
+  /**
+   * The ticket body. Harvest reads this to predict where a change lands; a
+   * summary alone is one line and routinely not enough to predict anything.
+   */
+  description: z.string().optional(),
   url: z.string().url().optional(),
   profile: PipelineProfile,
   tracker: z.enum(['jira', 'linear', 'github', 'manual']).default('jira'),

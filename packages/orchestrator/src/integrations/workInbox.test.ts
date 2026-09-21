@@ -2,7 +2,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { JiraClient, MY_OPEN_ISSUES_JQL, jiraSetupHint, resolveJiraConfig, type JiraFetcher } from './jira.js';
+import {
+  JiraClient, MY_OPEN_ISSUES_JQL, RESOLVED_WINDOW_DAYS, jiraSetupHint, plainText,
+  resolveJiraConfig, type JiraFetcher,
+} from './jira.js';
 import { WorkInbox, mergedItems, type WorkItem } from './workInbox.js';
 
 let dir: string;
@@ -15,7 +18,7 @@ const issue = {
   key: 'PAY-1423',
   fields: {
     summary: 'Checkout empty state',
-    status: { name: 'In Progress' },
+    status: { name: 'In Progress', statusCategory: { key: 'indeterminate' } },
     issuetype: { name: 'Story' },
     priority: { name: 'High' },
     labels: ['checkout-v2'],
@@ -55,6 +58,19 @@ describe('Jira: what is assigned to me', () => {
     expect(jql).toContain('resolution = Unresolved');
   });
 
+  it('asks for recently resolved work too, or the Done tab can never fill', async () => {
+    const f = jiraFetch({ issues: [] });
+    await new JiraClient(config, f).search();
+    const jql = decodeURIComponent(new URL(f.urls[0]!).searchParams.get('jql')!);
+    expect(jql).toContain(`resolved >= -${RESOLVED_WINDOW_DAYS}d`);
+  });
+
+  it('bounds how far back resolved work reaches', () => {
+    // Unbounded, this pulls an entire history into a 200-item cap and
+    // truncates current work behind tickets closed years ago.
+    expect(MY_OPEN_ISSUES_JQL).toMatch(/resolved >= -\d+d/);
+  });
+
   it('flattens the fields a list needs, and builds the browse URL', async () => {
     const [i] = await new JiraClient(config, jiraFetch({ issues: [issue] })).search();
     expect(i).toMatchObject({
@@ -62,6 +78,31 @@ describe('Jira: what is assigned to me', () => {
       issueType: 'Story', priority: 'High', labels: ['checkout-v2'], assignee: 'Buddha Nag',
       url: 'https://acme.atlassian.net/browse/PAY-1423',
     });
+  });
+
+  it('buckets on the status category, not the status name', async () => {
+    // Status names are per-project and renamed freely; the category is the
+    // only stable thing to tab on.
+    const of = async (status: unknown) => {
+      const [i] = await new JiraClient(config, jiraFetch({ issues: [{ key: 'X-1', fields: { status } }] })).search();
+      return i!.statusCategory;
+    };
+    expect(await of({ name: 'Selected for Development', statusCategory: { key: 'new' } })).toBe('new');
+    expect(await of({ name: 'Code Review', statusCategory: { key: 'indeterminate' } })).toBe('indeterminate');
+    expect(await of({ name: 'Shipped', statusCategory: { key: 'done' } })).toBe('done');
+  });
+
+  it('calls an unrecognised category unknown rather than guessing a bucket', async () => {
+    const [i] = await new JiraClient(config, jiraFetch({ issues: [{ key: 'X-1' }] })).search();
+    expect(i!.statusCategory).toBe('unknown');
+  });
+
+  it('asks for the description, which harvest needs to predict anything', async () => {
+    // Without it the phase gets a one-line summary and fails with
+    // "digest predicted an empty touch set".
+    const f = jiraFetch({ issues: [] });
+    await new JiraClient(config, f).search();
+    expect(f.urls[0]).toContain('description');
   });
 
   it('tolerates a trailing slash on the host', async () => {
@@ -158,6 +199,53 @@ function jiraProvider(behaviour: () => unknown[]) {
 
 const cacheFile = () => join(dir, 'cache', 'inbox.json');
 
+describe('Jira descriptions arrive as ADF, not text', () => {
+  const doc = (...content: unknown[]) => ({ type: 'doc', version: 1, content });
+  const para = (...text: string[]) => ({
+    type: 'paragraph', content: text.map((t) => ({ type: 'text', text: t })),
+  });
+
+  it('flattens a document to prose', () => {
+    expect(plainText(doc(para('Checkout is empty.'), para('Repro: add nothing.'))))
+      .toBe('Checkout is empty.\nRepro: add nothing.');
+  });
+
+  it('keeps list items on their own lines', () => {
+    const list = {
+      type: 'bulletList',
+      content: [
+        { type: 'listItem', content: [para('one')] },
+        { type: 'listItem', content: [para('two')] },
+      ],
+    };
+    expect(plainText(doc(list)).split('\n')).toEqual(['one', 'two']);
+  });
+
+  it('joins inline marks without breaking a sentence apart', () => {
+    // Bold and links are separate text nodes inside one paragraph; a naive
+    // newline-per-node turns a sentence into a list.
+    expect(plainText(doc(para('the ', 'checkout', ' page')))).toBe('the checkout page');
+  });
+
+  it('accepts a plain string, which older instances still return', () => {
+    expect(plainText('just text')).toBe('just text');
+  });
+
+  it('never yields [object Object] for a shape it does not know', () => {
+    // Worse than empty: it looks like content, so nothing downstream notices.
+    for (const v of [undefined, null, {}, { type: 'weird' }, 42]) {
+      expect(plainText(v)).not.toContain('object Object');
+    }
+  });
+
+  it('reads the description onto the issue', async () => {
+    const [i] = await new JiraClient(config, jiraFetch({
+      issues: [{ key: 'X-1', fields: { description: doc(para('the body')) } }],
+    })).search();
+    expect(i!.description).toBe('the body');
+  });
+});
+
 describe('the work inbox poller (§6.4)', () => {
   it('reports the items it fetched', async () => {
     const inbox = new WorkInbox({
@@ -171,6 +259,61 @@ describe('the work inbox poller (§6.4)', () => {
     const snap = await inbox.refreshNow();
     expect(snap.jira.items).toHaveLength(1);
     expect(snap.stale).toBe(false);
+  });
+
+  it('carries the status category through to the item the UI tabs on', async () => {
+    // The mapping is the whole point: a category that stops at the Jira
+    // client leaves every tab but All empty.
+    const inbox = new WorkInbox({
+      cacheFile: cacheFile(),
+      providers: {
+        jira: jiraProvider(() => [
+          { key: 'PAY-1', summary: 'a', statusCategory: 'done', labels: [] },
+        ]),
+      },
+    });
+    const snap = await inbox.refreshNow();
+    expect(snap.jira.items[0]!.category).toBe('done');
+  });
+
+  it('defaults to PRs you are involved in, not only ones assigned to you', async () => {
+    const seen: unknown[] = [];
+    const inbox = new WorkInbox({
+      cacheFile: cacheFile(),
+      providers: {
+        github: async () => ({
+          repo: { owner: 'o', name: 'r' },
+          client: {
+            listPullRequests: async (query: unknown) => { seen.push(query); return []; },
+          } as never,
+        }),
+      },
+    });
+    await inbox.refreshNow();
+    expect(seen[0]).toMatchObject({ involves: true });
+    expect(seen[0]).not.toHaveProperty('reviewRequested');
+  });
+
+  it('drops the cached PR list when the scope changes', async () => {
+    // The cached list was built under the old scope; showing it under the new
+    // one tells the user their setting did nothing.
+    const inbox = new WorkInbox({
+      cacheFile: cacheFile(),
+      prScope: 'involves',
+      providers: {
+        github: async () => ({
+          repo: { owner: 'o', name: 'r' },
+          client: { listPullRequests: async () => [
+            { number: 1, title: 't', url: '', author: 'a', labels: [], draft: false, updatedAt: '' },
+          ] } as never,
+        }),
+      },
+    });
+    await inbox.refreshNow();
+    expect(inbox.snapshot().github.items).toHaveLength(1);
+
+    inbox.setPrScope('authored');
+    expect(inbox.snapshot().github.items).toHaveLength(0);
   });
 
   it('keeps the last good list when a source goes away', async () => {

@@ -218,3 +218,59 @@ describe('finding a token', () => {
     expect(hint).toMatch(/Pull requests: Read/);
   });
 });
+
+describe('whose pull requests count as yours', () => {
+  it('asks for everything you are involved in, which includes your own', () => {
+    // `review-requested:@me` by definition never matches a PR you opened, so
+    // on a repo where you are the author the inbox was permanently empty.
+    expect(buildSearchQuery(q({ involves: true }))).toContain('involves:@me');
+  });
+
+  it('can narrow to reviews actually requested from you', () => {
+    expect(buildSearchQuery(q({ reviewRequested: true }))).toContain('review-requested:@me');
+  });
+
+  it('can narrow to what you opened', () => {
+    expect(buildSearchQuery(q({ authored: true }))).toContain('author:@me');
+  });
+
+  it('asks for every open PR when nothing narrows it', () => {
+    const search = buildSearchQuery(q());
+    expect(search).toContain('is:pr');
+    expect(search).toContain('is:open');
+    for (const narrowing of ['involves:@me', 'review-requested:@me', 'author:']) {
+      expect(search).not.toContain(narrowing);
+    }
+  });
+});
+
+describe('the reads that dedupe depends on (§7.5)', () => {
+  it('keeps the position of a comment on an outdated line', async () => {
+    // GitHub moves the position to `original_line` once the line has been
+    // rewritten. Without the fallback these read as file-level comments and
+    // suppress every finding in the file.
+    const f = fakeFetch([
+      { path: 'src/a.ts', line: 42, user: { login: 'ana', type: 'User' }, body: 'x' },
+      { path: 'src/a.ts', line: null, original_line: 17, user: { login: 'bo', type: 'User' }, body: 'y' },
+    ]);
+    const got = await new GitHubClient({ token: 't', fetcher: f }).listReviewComments(repo, 7);
+    expect(got.map((c) => c.line)).toEqual([42, 17]);
+  });
+
+  it('marks bot comments, so our own review does not suppress the next one', async () => {
+    const f = fakeFetch([
+      { path: 'a', line: 1, user: { login: 'ana', type: 'User' }, body: '' },
+      { path: 'a', line: 2, user: { login: 'agentflow', type: 'Bot' }, body: '' },
+    ]);
+    const got = await new GitHubClient({ token: 't', fetcher: f }).listReviewComments(repo, 7);
+    expect(got.map((c) => c.authorIsBot)).toEqual([false, true]);
+  });
+
+  it('reads submitted reviews with the commit each one judged', async () => {
+    const f = fakeFetch([
+      { user: { login: 'ana' }, body: 'lgtm', state: 'APPROVED', commit_id: 'abc', submitted_at: 't' },
+    ]);
+    const got = await new GitHubClient({ token: 't', fetcher: f }).listReviews(repo, 7);
+    expect(got[0]).toMatchObject({ author: 'ana', state: 'APPROVED', commitSha: 'abc' });
+  });
+});

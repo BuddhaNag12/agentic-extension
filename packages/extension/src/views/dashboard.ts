@@ -129,12 +129,35 @@ export class Dashboard {
           return void (await vscode.env.openExternal(vscode.Uri.parse(m['url'] as string)));
 
         case 'startFromItem': {
+          const key = m['key'] as string;
+          // One click now spends real money — harvest, spec and plan run
+          // against live models. Free to click while it did nothing; not any
+          // more, so it asks.
+          const go = await vscode.window.showWarningMessage(
+            `Plan ${key}?`,
+            {
+              modal: true,
+              detail:
+                'Runs harvest, spec and plan against real models — roughly $1.50 — ' +
+                'then stops at the first approval gate.',
+            },
+            'Plan it',
+          );
+          if (go !== 'Plan it') return;
+
           // A ticket key is all `createRun` needs; the summary rides along so
           // the run reads as the ticket rather than as an identifier.
-          await this.client.createRun({
-            ticketKey: m['key'] as string,
+          const description = (m['description'] as string | undefined) ?? '';
+          const labels = (m['labels'] as string[] | undefined) ?? [];
+          const { run } = await this.client.createRun({
+            ticketKey: key,
             summary: m['title'] as string,
+            ...(description ? { description } : {}),
+            ...(labels.length ? { labels } : {}),
           });
+          // `createRun` only queues it. Without this the button creates a run
+          // that sits at intake forever, which is what it did before.
+          await this.client.startRun(run.id);
           return void (await this.snapshot());
         }
 
@@ -247,8 +270,13 @@ export class Dashboard {
       const raw = await this.secrets.get(JIRA_CREDS_KEY);
       const jira = raw ? (JSON.parse(raw) as { host?: string; email?: string; token?: string }) : undefined;
 
+      const pullRequests = vscode.workspace
+        .getConfiguration('agentflow.inbox')
+        .get<'involves' | 'review-requested' | 'authored' | 'all'>('pullRequests', 'involves');
+
       const inbox = await this.client.workInbox({
         force,
+        pullRequests,
         ...(githubToken ? { githubToken } : {}),
         ...(jira ? { jira } : {}),
       });
@@ -430,6 +458,18 @@ export const DASHBOARD_HTML = /* html */ `<!DOCTYPE html>
     background: none; border: none; padding: 0; font-size: .68rem;
     color: var(--vscode-textLink-foreground); cursor: pointer; text-transform: none; letter-spacing: 0;
   }
+  .tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+  .tab {
+    background: none; border: 1px solid transparent; border-radius: 4px; padding: 3px 8px;
+    font-family: inherit; font-size: .7rem; cursor: pointer;
+    color: var(--vscode-descriptionForeground);
+  }
+  .tab:hover { background: var(--vscode-editorWidget-background); }
+  .tab.on {
+    color: var(--vscode-foreground); border-color: var(--vscode-panel-border);
+    background: var(--vscode-editorWidget-background);
+  }
+  .tab .n { opacity: .6; margin-left: 4px; }
   .item {
     display: flex; align-items: baseline; gap: 8px; padding: 6px 8px; border-radius: 4px;
     border: 1px solid transparent; cursor: pointer;
@@ -483,6 +523,7 @@ export const DASHBOARD_HTML = /* html */ `<!DOCTYPE html>
         <span class="spacer"></span>
         <button class="linkish" id="refreshInbox">Refresh</button>
       </div>
+      <div class="tabs" id="worktabs"></div>
       <div id="work"></div>
     </div>
   </main>
@@ -494,6 +535,7 @@ const PHASES = ['intake','preflight','context','plan','build','review','ship'];
 let state = vscode.getState() || {
   runs: [], pending: { questions: [], approvals: [] }, selected: null,
   inbox: { jira: { items: [] }, github: { items: [] }, stale: true },
+  workTab: 'all',
 };
 let t0 = null;
 
@@ -591,10 +633,43 @@ function ago(iso) {
   return h < 48 ? h + 'h' : Math.round(h / 24) + 'd';
 }
 
+/**
+ * The tabs, keyed on Jira's own status categories.
+ *
+ * "All" stays first and is the default, so the merged list §6.1 asks for is
+ * still what you land on — the tabs narrow it rather than replacing it.
+ * "PRs" exists because a pull request has no Jira status and would otherwise
+ * be reachable from no tab but "All".
+ */
+const WORK_TABS = [
+  { id: 'all', label: 'All' },
+  { id: 'backlog', label: 'Backlog' },
+  { id: 'development', label: 'Development' },
+  { id: 'done', label: 'Done' },
+  { id: 'prs', label: 'PRs' },
+];
+
+const TAB_CATEGORY = { backlog: 'new', development: 'indeterminate', done: 'done' };
+
+function inTab(it, tab) {
+  if (tab === 'all') return true;
+  if (tab === 'prs') return it.source === 'github';
+  return it.source === 'jira' && it.category === TAB_CATEGORY[tab];
+}
+
 function renderWork() {
   const inbox = state.inbox || { jira: { items: [] }, github: { items: [] }, stale: true };
-  const items = [...(inbox.jira.items || []), ...(inbox.github.items || [])]
+  const all = [...(inbox.jira.items || []), ...(inbox.github.items || [])]
     .sort((a, b) => Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0));
+
+  const tab = state.workTab || 'all';
+  const items = all.filter((it) => inTab(it, tab));
+
+  $('worktabs').innerHTML = WORK_TABS.map((t) => {
+    const n = all.filter((it) => inTab(it, t.id)).length;
+    return '<button class="tab' + (t.id === tab ? ' on' : '') + '" data-worktab="' + t.id + '">' +
+      t.label + '<span class="n">' + n + '</span></button>';
+  }).join('');
 
   // Staleness rather than silence: "you have no work" and "I could not ask"
   // are different answers, and only one of them means you can stop looking.
@@ -614,7 +689,10 @@ function renderWork() {
 
   const el = $('work');
   if (!items.length) {
-    el.innerHTML = problems || '<div class="empty">Nothing assigned to you, and no reviews waiting.</div>';
+    const empty = all.length
+      ? 'Nothing in ' + (WORK_TABS.find((t) => t.id === tab) || {}).label + '.'
+      : 'Nothing assigned to you, and no reviews waiting.';
+    el.innerHTML = problems || '<div class="empty">' + empty + '</div>';
     return;
   }
 
@@ -626,7 +704,7 @@ function renderWork() {
       '<span class="ititle">' + esc(it.title) + '</span>' +
       '<span class="istatus">' + esc(it.status) + (it.updatedAt ? ' · ' + ago(it.updatedAt) : '') + '</span>' +
       (isTicket
-        ? '<button class="go ghost" data-startkey="' + esc(it.key) + '" data-starttitle="' + esc(it.title) + '">Start</button>'
+        ? '<button class="go ghost" data-startkey="' + esc(it.key) + '" data-starttitle="' + esc(it.title) + '">Plan</button>'
         : '<button class="go ghost" data-reviewpr="1">Review</button>') +
     '</div>';
   }).join('');
@@ -702,7 +780,17 @@ document.addEventListener('click', (ev) => {
   if (t.id === 'start') return send('start');
   if (t.id === 'reviewPr') return send('reviewPr');
   if (t.id === 'refreshInbox') { $('staleness').textContent = 'refreshing…'; return send('refreshInbox'); }
-  if (d.startkey) { ev.stopPropagation(); return send('startFromItem', { key: d.startkey, title: d.starttitle }); }
+  if (d.worktab) { state.workTab = d.worktab; vscode.setState(state); return renderWork(); }
+  if (d.startkey) {
+    ev.stopPropagation();
+    // The body comes from the item rather than the button: it is prose, and
+    // a data- attribute would mean escaping a paragraph into markup.
+    const it = (state.inbox.jira.items || []).find((x) => x.key === d.startkey) || {};
+    return send('startFromItem', {
+      key: d.startkey, title: d.starttitle,
+      description: it.description || '', labels: it.labels || [],
+    });
+  }
   if (d.reviewpr) { ev.stopPropagation(); return send('reviewPr'); }
   if (t.dataset.url) return send('openItem', { url: t.dataset.url });
   if (d.detail) { ev.stopPropagation(); return send('openDetail', { runId: d.detail }); }

@@ -106,6 +106,25 @@ export const DEFAULT_SAFE_PREFIXES = [
  */
 const NAVIGATION = /^cd\s+[^;&|]+$/;
 
+/**
+ * `git -C <dir> log` is the same read as `git log`, and inside a worktree it
+ * is the natural shape — the agent knows the absolute path and does not have
+ * to `cd` first. Literal prefix matching missed every one of them: a live
+ * harvest run spent its whole exploration budget on refusals and returned an
+ * empty touch set. `--no-pager` is stripped for the same reason.
+ */
+function canonicalGit(segment: string): string {
+  let out = segment;
+  for (let i = 0; i < 3; i += 1) {
+    const next = out
+      .replace(/^git\s+-C\s+(?:"[^"]*"|'[^']*'|\S+)\s+/, 'git ')
+      .replace(/^git\s+--no-pager\s+/, 'git ');
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
 export function checkBash(command: string, safePrefixes: readonly string[] = DEFAULT_SAFE_PREFIXES): GuardrailDecision {
   const normalized = command.replace(/\s+/g, ' ').trim();
   const segments = splitCommand(normalized);
@@ -114,19 +133,31 @@ export function checkBash(command: string, safePrefixes: readonly string[] = DEF
   // segment. Segment-first would let `curl x.sh | bash` match the merely-ask
   // network rule on its first segment and never see the pipe-to-shell rule,
   // which only exists in the unsplit text. A deny anywhere beats an ask.
-  for (const candidate of [normalized, ...segments]) {
+  // Also against the canonical form: every rule matches `git <verb>`, and
+  // `git -C /path push --force` is the same push. Without this the -C spelling
+  // walked straight past the force-push denial — it only ever landed on `ask`
+  // because no safe prefix matched it either, which is luck, not a control.
+  const candidates = [normalized, ...segments].flatMap((c) => {
+    const canonical = canonicalGit(c);
+    return canonical === c ? [c] : [c, canonical];
+  });
+
+  for (const candidate of candidates) {
     for (const rule of RULES) {
       if (rule.decision === 'deny' && rule.re.test(candidate)) return deny(rule.rule, rule.reason);
     }
   }
 
-  for (const segment of segments) {
+  for (const segment of candidates) {
     for (const rule of RULES) {
       if (rule.decision === 'ask' && rule.re.test(segment)) return ask(rule.rule, rule.reason);
     }
   }
 
-  if (segments.every((seg) => NAVIGATION.test(seg) || safePrefixes.some((p) => seg.startsWith(p)))) {
+  if (segments.every((seg) => {
+    const canonical = canonicalGit(seg);
+    return NAVIGATION.test(seg) || safePrefixes.some((p) => seg.startsWith(p) || canonical.startsWith(p));
+  })) {
     return ALLOW;
   }
   return ask('bash.unrecognized', `"${truncate(normalized)}" is not on the auto-approved list.`);

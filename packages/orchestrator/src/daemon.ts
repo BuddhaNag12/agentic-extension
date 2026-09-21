@@ -17,6 +17,7 @@ import {
 import { HitlBroker } from './hitl.js';
 import { clearLock, entryBuildId, writeLock } from './lock.js';
 import type { WorkspacePaths } from './paths.js';
+import { loadRepoRegistry, routeTicket } from './repos.js';
 import { FakeRunDriver } from './runs/fakeDriver.js';
 import { RealRunDriver } from './runs/realDriver.js';
 import { RunStore } from './runs/store.js';
@@ -74,7 +75,7 @@ export class Orchestrator {
         );
 
     this.inbox = new WorkInbox({
-      cacheFile: inboxCachePath(paths.agentflowDir),
+      cacheFile: inboxCachePath(paths.stateDir),
       providers: {
         jira: () => this.jira(),
         github: () => this.github(this.creds.githubToken),
@@ -181,13 +182,44 @@ export class Orchestrator {
     }));
 
     c.onRequest(Methods.createRun, (p: CreateRunParams) => {
+      // Re-read every time: editing the registry should not need a restart,
+      // and runs are created rarely enough that the read is free.
+      const registry = loadRepoRegistry(this.paths.root, this.paths.configDir);
+      // A pull request belongs to the repo it was opened against; only a
+      // ticket is free to route somewhere else.
+      const route = p.pullRequest
+        ? { repo: registry.fallback, why: 'fallback' as const, ambiguous: undefined }
+        : routeTicket(registry, {
+            ticketKey: p.ticketKey,
+            ...(p.labels ? { labels: p.labels } : {}),
+            ...(p.repoId ? { repoId: p.repoId } : {}),
+          });
+
       const handle = this.store.create({
         ticketKey: p.ticketKey,
+        repo: { id: route.repo.id, path: route.repo.path, baseBranch: route.repo.baseBranch },
         ...(p.summary ? { summary: p.summary } : {}),
+        ...(p.description ? { description: p.description } : {}),
         ...(p.workflow ? { workflow: p.workflow } : {}),
         ...(p.profile ? { profile: p.profile } : {}),
         ...(p.baseRef ? { baseRef: p.baseRef } : {}),
       });
+
+      // Which repo, and why. Branching the wrong repository and not finding
+      // out until ship is the failure this line exists to prevent.
+      this.store.emitEvent(handle, {
+        t: 'log', level: 'info',
+        message: `repo ${route.repo.id} (${route.repo.path}) — ${route.why}`,
+      });
+      for (const problem of registry.problems) {
+        this.store.emitEvent(handle, { t: 'log', level: 'warn', message: problem });
+      }
+      if (route.ambiguous) {
+        this.store.emitEvent(handle, {
+          t: 'log', level: 'warn',
+          message: `${route.ambiguous.join(', ')} all claim this ticket; used ${route.repo.id}.`,
+        });
+      }
       return { run: handle.run };
     });
 
@@ -301,6 +333,7 @@ export class Orchestrator {
       // The extension holds the credentials; it hands them over with the
       // request, and the daemon keeps them only for as long as it is up.
       this.creds = p;
+      if (p.pullRequests) this.inbox.setPrScope(p.pullRequests);
       // Cache first (§6.4): the list renders instantly and refreshes behind
       // it. Only an explicit refresh waits for the network.
       if (!p.force) {
@@ -413,7 +446,7 @@ export class Orchestrator {
   /** A Jira client for this workspace, or why there is not one. */
   private async jira(): Promise<{ client: JiraClient } | { problem: string }> {
     const config = resolveJiraConfig({
-      agentflowDir: this.paths.agentflowDir,
+      agentflowDir: this.paths.configDir,
       ...(this.creds.jira ? { stored: this.creds.jira } : {}),
     });
     if (!config) return { problem: jiraSetupHint() };
@@ -481,7 +514,7 @@ export function setLogFile(path: string): void {
   logFile = path;
 }
 
-function log(message: string): void {
+export function log(message: string): void {
   const line = `[agentflow] ${new Date().toISOString()} ${message}\n`;
   if (logFile) {
     try {

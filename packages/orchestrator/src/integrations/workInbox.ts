@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { GitHubClient, type RepoCoordinates } from './github.js';
-import { JiraClient } from './jira.js';
+import { JiraClient, type StatusCategory } from './jira.js';
 
 /**
  * The Work Inbox poller (§6.1, §6.4): the tickets assigned to you and the
@@ -32,6 +32,10 @@ export interface WorkItem {
   title: string;
   url: string;
   status: string;
+  /** Jira's status category, for the inbox tabs. Absent on a GitHub item. */
+  category?: StatusCategory | undefined;
+  /** The ticket body, so starting a run from here has something to harvest. */
+  description?: string | undefined;
   labels: string[];
   updatedAt: string;
   /** Jira: the issue type. GitHub: the author. */
@@ -64,8 +68,19 @@ export interface InboxProviders {
   github?: () => Promise<{ client: GitHubClient; repo: RepoCoordinates } | { problem: string }>;
 }
 
+/**
+ * Which pull requests count as "your work" (§6.1).
+ *
+ * This was hardcoded to `review-requested`, which is the one filter that can
+ * never match a PR you opened yourself — so on any repo where you are the
+ * author, the list was permanently empty and looked broken.
+ */
+export type PrScope = 'involves' | 'review-requested' | 'authored' | 'all';
+
 export interface WorkInboxOptions {
   cacheFile: string;
+  /** Defaults to `involves`: opened by you, or waiting on you. */
+  prScope?: PrScope;
   providers: InboxProviders;
   jiraIntervalMs?: number;
   githubIntervalMs?: number;
@@ -125,6 +140,13 @@ export class WorkInbox extends EventEmitter {
     return this.state;
   }
 
+  /** Change the scope and drop the cached list, which was built under the old one. */
+  setPrScope(scope: PrScope): void {
+    if ((this.opts.prScope ?? 'involves') === scope) return;
+    this.opts.prScope = scope;
+    this.state = { ...this.state, github: empty(), stale: true };
+  }
+
   private async refreshJira(): Promise<void> {
     const provider = this.opts.providers.jira;
     if (!provider) return;
@@ -139,6 +161,8 @@ export class WorkInbox extends EventEmitter {
         title: i.summary,
         url: i.url,
         status: i.status,
+        category: i.statusCategory,
+        description: i.description,
         labels: i.labels,
         updatedAt: i.updatedAt,
         detail: i.issueType,
@@ -155,10 +179,13 @@ export class WorkInbox extends EventEmitter {
       if ('problem' in r) throw new Error(r.problem);
       // The PRs actually waiting on this person, which is what "tagged" means
       // in a review queue — not every open PR in the repo.
+      const scope = this.opts.prScope ?? 'involves';
       const prs = await r.client.listPullRequests({
         repo: r.repo,
         state: 'open',
-        reviewRequested: true,
+        ...(scope === 'review-requested' ? { reviewRequested: true } : {}),
+        ...(scope === 'involves' ? { involves: true } : {}),
+        ...(scope === 'authored' ? { authored: true } : {}),
         limit: Math.min(MAX_ITEMS, 100),
       });
       return prs.map((p): WorkItem => ({
@@ -227,8 +254,8 @@ function empty(): SourceState {
   return { items: [], fetchedAt: undefined, problem: undefined };
 }
 
-export function inboxCachePath(agentflowDir: string): string {
-  return join(agentflowDir, 'cache', 'inbox.json');
+export function inboxCachePath(stateDir: string): string {
+  return join(stateDir, 'cache', 'inbox.json');
 }
 
 /** Both sources merged, most recently updated first — §6.1's "one list". */

@@ -55,6 +55,14 @@ export interface PrQuery {
   state?: 'open' | 'closed' | 'all';
   /** Only PRs whose review was requested from the authenticated user. */
   reviewRequested?: boolean;
+  /**
+   * PRs the user is involved in at all — opened, assigned, mentioned or
+   * commented on. Broader than `reviewRequested`, which by definition never
+   * matches a PR you opened yourself.
+   */
+  involves?: boolean;
+  /** Only PRs the authenticated user opened. */
+  authored?: boolean;
   author?: string;
   limit?: number;
 }
@@ -122,6 +130,8 @@ export function buildSearchQuery(q: PrQuery): string {
 
   if (q.state !== 'all') parts.push(`is:${q.state ?? 'open'}`);
   if (q.reviewRequested) parts.push('review-requested:@me');
+  if (q.involves) parts.push('involves:@me');
+  if (q.authored) parts.push('author:@me');
   if (q.author) parts.push(`author:${q.author}`);
 
   const labels = q.labels ?? { kind: 'any' };
@@ -133,6 +143,29 @@ export function buildSearchQuery(q: PrQuery): string {
     for (const l of labels.labels) parts.push(`label:"${l}"`);
   }
   return parts.join(' ');
+}
+
+/**
+ * An existing review comment, for deduplicating against people (§7.5).
+ *
+ * `authorIsBot` matters: the rule is never to repeat what a *human* already
+ * said. Our own earlier comment is handled by the head-sha guard instead.
+ */
+export interface ReviewComment {
+  path: string;
+  line: number | undefined;
+  author: string;
+  authorIsBot: boolean;
+  body: string;
+}
+
+/** A submitted review, for the "already reviewed this sha" guard (§7.5). */
+export interface ExistingReview {
+  author: string;
+  body: string;
+  state: string;
+  commitSha: string;
+  submittedAt: string;
 }
 
 export class GitHubClient {
@@ -185,6 +218,46 @@ export class GitHubClient {
       .map((l) => (l as { name?: unknown }).name)
       .filter((n): n is string => typeof n === 'string')
       .sort();
+  }
+
+  /** Inline comments already on the PR, for dedupe (§7.5). */
+  async listReviewComments(repo: RepoCoordinates, number: number): Promise<ReviewComment[]> {
+    const raw = await this.get<unknown[]>(
+      `${this.api}/repos/${repo.owner}/${repo.name}/pulls/${number}/comments?per_page=100`,
+    );
+    return raw.map((c) => {
+      const o = (c ?? {}) as Record<string, unknown>;
+      const user = (o['user'] ?? {}) as Record<string, unknown>;
+      // A comment on an outdated line keeps its position only in
+      // `original_line`; without the fallback those dedupe as line-less and
+      // every one of them stops matching.
+      const line = o['line'] ?? o['original_line'];
+      return {
+        path: String(o['path'] ?? ''),
+        line: typeof line === 'number' ? line : undefined,
+        author: String(user['login'] ?? 'unknown'),
+        authorIsBot: user['type'] === 'Bot',
+        body: typeof o['body'] === 'string' ? o['body'] : '',
+      };
+    });
+  }
+
+  /** Reviews already submitted on the PR (§7.5). */
+  async listReviews(repo: RepoCoordinates, number: number): Promise<ExistingReview[]> {
+    const raw = await this.get<unknown[]>(
+      `${this.api}/repos/${repo.owner}/${repo.name}/pulls/${number}/reviews?per_page=100`,
+    );
+    return raw.map((r) => {
+      const o = (r ?? {}) as Record<string, unknown>;
+      const user = (o['user'] ?? {}) as Record<string, unknown>;
+      return {
+        author: String(user['login'] ?? 'unknown'),
+        body: typeof o['body'] === 'string' ? o['body'] : '',
+        state: String(o['state'] ?? ''),
+        commitSha: String(o['commit_id'] ?? ''),
+        submittedAt: String(o['submitted_at'] ?? ''),
+      };
+    });
   }
 
   private async get<T>(url: string): Promise<T> {

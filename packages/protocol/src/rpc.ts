@@ -32,6 +32,12 @@ export const CreateRunParams = z.object({
   /** Supply this to review a pull request rather than deliver a ticket (§7). */
   pullRequest: PullRequestRef.optional(),
   summary: z.string().optional(),
+  /** The ticket body, for harvest. Without it the phase has one line to go on. */
+  description: z.string().optional(),
+  /** A repo id from `.agentflow/config.json`. Overrides ticket routing. */
+  repoId: z.string().optional(),
+  /** Ticket labels, which routing may use to pick a repo. */
+  labels: z.array(z.string()).optional(),
   /** Workflow name (§21). Falls back to the configured default. */
   workflow: z.string().optional(),
   profile: PipelineProfile.optional(),
@@ -108,6 +114,14 @@ export const WorkItem = z.object({
   title: z.string(),
   url: z.string(),
   status: z.string(),
+  /**
+   * Jira's status category, for the inbox tabs. Optional because a cache
+   * written by an older build has no such field, and an inbox that throws on
+   * its own cache is worse than one missing a tab for a single poll.
+   */
+  category: z.enum(['new', 'indeterminate', 'done', 'unknown']).optional(),
+  /** The ticket body, carried so starting a run does not have to refetch it. */
+  description: z.string().optional(),
   labels: z.array(z.string()),
   updatedAt: z.string(),
   detail: z.string().optional(),
@@ -135,6 +149,8 @@ export const RefreshInboxParams = z.object({
     email: z.string().optional(),
     token: z.string().optional(),
   }).optional(),
+  /** Which pull requests count as yours (§6.1). */
+  pullRequests: z.enum(['involves', 'review-requested', 'authored', 'all']).optional(),
   force: z.boolean().default(false),
 });
 

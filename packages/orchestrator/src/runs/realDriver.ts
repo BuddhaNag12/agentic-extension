@@ -6,7 +6,7 @@ import {
   type AgentProvider, type AgentTurn, type ContextDigest, type Plan, type Spec, type WorkPacket,
 } from '@agentflow/agent-runtime';
 import { GateRegistry, runGate, type GateAdapter } from '@agentflow/gates';
-import type { GateReport, ResolvedWorkflow } from '@agentflow/protocol';
+import type { GateReport, ResolvedWorkflow, Run } from '@agentflow/protocol';
 import { classifyAttempt, failureSignature, shouldEscalate, type Effect } from '@agentflow/core';
 import type { Step } from '@agentflow/protocol';
 import type { WorkspacePaths } from '../paths.js';
@@ -14,6 +14,47 @@ import { WorktreeManager } from '../git/worktree.js';
 import type { Scheduler } from '../scheduler.js';
 import { prPackage } from './prPackage.js';
 import type { RunStore } from './store.js';
+
+/**
+ * What the phases read as "the ticket".
+ *
+ * A summary is one line, and harvest has to predict a touch set from it —
+ * which is exactly how a run dies with "digest predicted an empty touch set"
+ * before doing any work. A pull request always had its body included here;
+ * a ticket did not, because nothing carried one.
+ */
+/**
+ * What the activity log shows for a tool call.
+ *
+ * It used to be `calling Bash`. A live harvest run failed three shell
+ * commands in a row and the log recorded the name of the tool and nothing
+ * else — there was no way to tell what had been attempted, let alone why it
+ * exited 255. The command is the whole diagnostic value of the line.
+ */
+function describeToolCall(tool: string, input: Record<string, unknown> | undefined): string {
+  const i = input ?? {};
+  const pick = (...keys: string[]): string | undefined => {
+    for (const k of keys) {
+      const v = i[k];
+      if (typeof v === 'string' && v.trim()) return v.trim();
+    }
+    return undefined;
+  };
+  const detail = tool === 'Bash'
+    ? pick('command')
+    : pick('file_path', 'path', 'notebook_path', 'pattern', 'url', 'query', 'prompt');
+  if (!detail) return `calling ${tool}`;
+  const flat = detail.replace(/\s+/g, ' ');
+  return `${tool} ${flat.length > 160 ? `${flat.slice(0, 159)}…` : flat}`;
+}
+
+function ticketText(run: Run): string {
+  if (run.pullRequest) {
+    return `${run.pullRequest.title}\n\n${run.pullRequest.body ?? ''}`.trim();
+  }
+  const { summary, description } = run.ticket;
+  return description ? `${summary}\n\n${description}`.trim() : summary;
+}
 
 /**
  * Drives a run through the real steps (§5). Same surface as the fake driver,
@@ -200,7 +241,7 @@ export class RealRunDriver {
       }
 
       case 'worktree': {
-        const tree = new WorktreeManager(this.paths.root);
+        const tree = new WorktreeManager(handle.run.repo.path);
 
         // §7.2: a review run checks out the pull request's head rather than
         // branching from the base. The diff is against the *merge base*, so a
@@ -325,9 +366,7 @@ export class RealRunDriver {
         if (!state.worktree) return this.block(runId, 'no worktree: preflight did not complete');
         const r = await runHarvest(this.provider, {
           ticketKey: handle.run.ticket.key,
-          ticketDescription: handle.run.pullRequest
-            ? `${handle.run.pullRequest.title}\n\n${handle.run.pullRequest.body ?? ''}`
-            : handle.run.ticket.summary,
+          ticketDescription: ticketText(handle.run),
           worktree: state.worktree!,
           workflow,
         }, stream);
@@ -341,7 +380,7 @@ export class RealRunDriver {
       case 'draft_spec': {
         const r = await runSpec(this.provider, {
           ticketKey: handle.run.ticket.key,
-          ticketDescription: handle.run.ticket.summary,
+          ticketDescription: ticketText(handle.run),
           digest: state.digest!,
           worktree: state.worktree!,
           workflow,
@@ -423,7 +462,7 @@ export class RealRunDriver {
       // time would sweep those files into the wrong commit. The step names stay
       // the phase's shape for the board; `verify` is the whole-tree gate.
       case 'implement': {
-        const tree = new WorktreeManager(this.paths.root);
+        const tree = new WorktreeManager(handle.run.repo.path);
         for (const packet of state.packets ?? []) {
           if (this.cancelled.has(runId)) return;
           this.store.emitEvent(handle, { t: 'task_status', taskId: packet.task.id, status: 'active' });
@@ -608,7 +647,7 @@ export class RealRunDriver {
         if (!state.worktree || !state.baseSha) {
           return this.block(runId, 'no worktree: cannot review a change that is not there');
         }
-        const tree = new WorktreeManager(this.paths.root);
+        const tree = new WorktreeManager(handle.run.repo.path);
         const { patch, truncated } = await tree.diff(state.worktree, state.baseSha);
         if (!patch.trim()) {
           // Nothing to review is not a clean review. It means build produced no
@@ -722,7 +761,7 @@ export class RealRunDriver {
 
       // --- ship (§5.8) -------------------------------------------------------
       case 'rebase': {
-        const tree = new WorktreeManager(this.paths.root);
+        const tree = new WorktreeManager(handle.run.repo.path);
         const worktree = state.worktree!;
 
         // 1. Rebase onto the base. A conflict blocks (§13.3) — auto-resolution
@@ -923,7 +962,7 @@ export class RealRunDriver {
       if (sha && state?.worktree) {
         // Rung 4 actually rewinds. Replanning on top of a half-repaired tree
         // would hand the planner a state no plan describes.
-        await new WorktreeManager(this.paths.root).restore(state.worktree, sha)
+        await new WorktreeManager(handle.run.repo.path).restore(state.worktree, sha)
           .then(() => this.store.emitEvent(handle, {
             t: 'checkpoint', label: `rewound ${taskId} to its pre-task checkpoint`, commitSha: sha,
           }))
@@ -1112,7 +1151,7 @@ export class RealRunDriver {
     if (turn.type === 'tool_call') {
       this.store.emitEvent(handle, {
         t: 'tool_call', tool: turn.tool ?? '', toolUseId: turn.toolUseId ?? '',
-        summaryLine: `calling ${turn.tool}`,
+        summaryLine: describeToolCall(turn.tool ?? '', turn.input),
       });
     } else if (turn.type === 'tool_result') {
       this.store.emitEvent(handle, {

@@ -1130,3 +1130,115 @@ could have seen it. Verified by reverting the fix: both survival tests fail
 there, and fail *fast* — the handshake carries its own 5s clock, because a
 dead daemon leaves the request pending forever and the first version of the
 test hung the suite instead of failing it.
+
+## Decisions made publishing findings to GitHub
+
+### D75 — The write surface is its own module, and cannot express an approval
+
+§7.5's two rules are the whole design here, and both are enforced rather than
+documented.
+
+**Never `APPROVE`.** `ReviewEvent` has two members — `COMMENT` and
+`REQUEST_CHANGES`. An approval is not a value this code can construct, so the
+rule holds even where a caller is careless. `publish` also checks the value at
+runtime, which is redundant by design: this is the one place in the system
+where being wrong forges someone's signature on someone else's code, and
+redundancy is cheap against that.
+
+**A separate module.** `github.ts` is read-only by construction (D51) and
+stays that way; `publishReview.ts` is the only file that POSTs. This keeps
+"what can write?" answerable by listing one file, and it is why the write path
+does not reuse `github.ts`'s request helper. The error messages genuinely
+differ anyway — a 403 on a write means the token *can* read the repository it
+just failed to write to, and reusing the read path's "missing the repository
+scope" would send someone to check the wrong permission.
+
+Nothing inside the pipeline calls `publish`. It takes already-triaged findings
+and there is no threshold, no setting and no caller that reaches it without a
+person, which is §7.5's second rule.
+
+### D76 — Deduplication is a window, and the sha record lives on GitHub
+
+Two decisions where the conservative direction is not the obvious one.
+
+**A window, not an exact line.** A person commenting on line 42 and the
+reviewer flagging line 44 of the same hunk are discussing the same code.
+`DEDUPE_WINDOW` is 3, and suppressing a little too eagerly is the right error
+to make: a dropped finding is still sitting in the triage view where its
+author can see it, while a duplicate is visible to everyone on the PR and is
+exactly what gets a bot muted. Bot comments never suppress, or our own
+previous review would silence the next one.
+
+**The sha marker.** "Never re-review a head sha already reviewed" has to
+survive a window reload, a reinstall and a second machine, so it cannot be
+local state. The review body carries `<!-- agentflow:review sha=... -->` and
+GitHub is the record. A force-push changes the sha, which invalidates it for
+free rather than by cache logic. The marker is matched in full, so a human
+review that merely mentions the sha in prose does not read as ours.
+
+### D77 — A rejected anchor degrades the review instead of losing it
+
+GitHub rejects the *entire* review with a 422 if any single comment is
+anchored to a line outside the diff. One bad line number would therefore throw
+away every other finding a person had just spent their attention triaging.
+
+Two layers. `select()` routes findings with no line, or a line the caller says
+is not in the diff, into the summary body before anything is sent. And if a
+422 still comes back, `publish` retries once with every comment folded into
+the body and reports `degraded: true`, so the caller can say what happened.
+Body-only is worse than inline and much better than silence.
+
+## Decisions made routing a ticket to a repository
+
+### D78 — One repo per run, but no longer necessarily the workspace
+
+§1376 asked whether `Run` is one-repo-*by-definition* or one-repo-*in-v1*, and
+warned that retrofitting the second is expensive. This answers it: one repo
+per run, chosen rather than assumed.
+
+`RepoRef.id` and `Task.repo` had existed since M0 and **nothing read either**.
+`repo.path` was `paths.root` unconditionally, so a ticket whose changes lived
+in another repository could only be worked by closing the workspace and
+opening that one.
+
+The constraint that looked necessary — restrict the registry to paths inside
+the workspace — turns out to be useless. Sibling clones are the normal layout
+for related services, and a monorepo subdirectory is not a separate git
+repository at all, so an "inside only" registry would route nothing anybody
+has. `WorktreeManager` already took a repo root as a parameter and was simply
+always handed `paths.root`; rebinding those five call sites to
+`run.repo.path` is the whole mechanism.
+
+What stays in the workspace is the run's *state*: `.agentflow/runs`, the lock,
+the log and the IPC socket. Only git moves. A run's worktree is now a sibling
+of the repo it came from rather than of the workspace, because §20.2's rule is
+about the repo.
+
+Known gap: two workspaces whose registries both name repo X can each create
+worktrees in X. Worktrees are per-ticket so a collision needs the same ticket
+run twice, and `createWorktree` already refuses to clobber an existing path.
+Routing runs to the daemon that owns a repo is the honest fix and is deferred
+with the rest of cross-repo v2.
+
+### D79 — Routing degrades to the old behaviour, loudly
+
+Every failure path in `loadRepoRegistry` ends at the workspace repo: no
+config, unparseable config, no `repos` key, an id that matches nothing. A typo
+in a committed config file must not stop every run in the workspace, and
+"runs target the repo they always did" is a comprehensible failure in a way
+that "no run can start" is not.
+
+The workspace is kept as `fallback` even when the registry never mentions it,
+or a ticket matching no rule would have nowhere to go.
+
+A missing checkout or a path that is not a git repository is **reported, not
+rejected** — a teammate's clone may legitimately be absent on this machine,
+and that must not disable the repos that are present.
+
+Project key beats label: a key is structural, a label is something anyone can
+add to a ticket. An explicit `repoId` beats both, because a human naming a
+repository is not a heuristic.
+
+Every run logs which repo it chose and why, and says so when more than one
+entry claimed the ticket. Branching the wrong repository and not discovering
+it until ship is the failure this line exists to prevent.
