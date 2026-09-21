@@ -313,24 +313,9 @@ Decisions taken while building this, including the six open questions from
 
 ## Next
 
-The deliver slice now runs end to end. Two candidates:
-
-- **The single-pass reviewer (§5.7, the rest of §20 M2).** `auto_review` returns
-  zero findings honestly rather than faking a pass, so G3 currently shows the
-  diff and gate evidence and nothing else. M2 asks for one pass, not §5.7's
-  four.
-- **The Work Inbox (§20 M1):** Jira and GitHub auth via `SecretStorage`, saved
-  queries, the three-group TreeView, readiness chips. Independently shippable,
-  and it is what makes the tool something to open every morning.
-
-The repair loop (§11, M3) is the other large gap: a red gate blocks the run
-instead of converging. The checkpoint it needs to rewind to is now recorded
-before every task, which was the missing prerequisite.
-
-`harvest`, `draft_spec` and `draft_plan` run for real end to end — verified
-against this repository for $1.54 a run, producing a three-task DAG with zero
-gate violations. A Jira adapter can wait: a pasted ticket description exercises
-everything.
+The deliver slice, the reviewer, the Work Inbox and the PR review pipeline all
+run end to end. Current status, the ordered next steps, and the choices
+waiting on a human live in [PROGRESS.md](PROGRESS.md).
 
 Credentials: the Agent SDK drives the Claude Code CLI, which resolves its own
 auth, so a developer already signed into Claude Code needs no API key. Runs bill

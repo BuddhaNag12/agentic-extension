@@ -1082,3 +1082,51 @@ two to a test you can run.
 draining in a loop rather than awaiting one snapshot, because a step enqueues
 its successor while the first is still resolving. Six consecutive runs of the
 two driver suites and three of the full suite, all clean.
+
+## Decisions made making the daemon survive a reload
+
+### D73 — Logging must never be able to throw
+
+VS Code disposes output channels during extension-host teardown in
+registration order, which can bury ours before `OrchestratorClient.dispose()`
+runs. A socket error arriving in that window called `this.log()` into a dead
+channel, and the host logged "Channel has been closed" against AgentFlow's
+name — an error that reads as the extension breaking when it is only the
+extension trying to mention that it isn't.
+
+Every internal log now goes through a wrapper that no-ops once disposed and
+swallows a dead channel. Nothing was registered on `connection.onError`
+either, so a vscode-jsonrpc write that lost its socket mid-flight escaped as
+an unhandled `EPIPE`; reload guarantees that write. Teardown also drops our
+own socket listeners before destroying the socket and leaves a no-op behind,
+because an `'error'` with no listener is a throw in Node, not a warning.
+
+Cosmetic in effect, but the cost was diagnostic: our noise sat in the same log
+as everyone else's real failures.
+
+### D74 — A detached daemon cannot log to its parent's pipe
+
+The daemon is detached so that reloading a window cannot kill a run. That
+guarantee was false, and had been since the daemon existed.
+
+It logged to `process.stderr` — a pipe held by the extension host that spawned
+it. Every reload exits that host and closes the read end, so the next log line
+raised `EPIPE` with no handler, which in Node is fatal. The next line is
+`client attached`, which means the *new* window's own connection was what
+finished the daemon off. Whatever run was in flight went with it.
+
+The daemon now writes to `.agentflow/orchestrator.log`, rotated one generation
+past 2MB. `process.stdout` and `process.stderr` also get error handlers, so a
+broken pipe from anywhere else stays non-fatal — either change alone would
+have fixed this, and the second is cheap insurance against the next caller who
+reaches for stderr.
+
+The log file closes a gap found while diagnosing this: when a daemon died
+there was no record anywhere of why, in the extension host log or on disk.
+
+`daemonSurvival.test.ts` spawns the real entry point, because the bug lived
+entirely in how the process was wired to its parent and no in-process test
+could have seen it. Verified by reverting the fix: both survival tests fail
+there, and fail *fast* — the handshake carries its own 5s clock, because a
+dead daemon leaves the request pending forever and the first version of the
+test hung the suite instead of failing it.
