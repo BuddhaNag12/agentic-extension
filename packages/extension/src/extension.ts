@@ -4,7 +4,7 @@ import type { PendingChangedNotification, Run } from '@agentflow/protocol';
 import { OrchestratorClient } from './client/orchestratorClient.js';
 import { RunsTreeProvider } from './views/runsTree.js';
 import { InboxTreeProvider, type InboxNode } from './views/inboxTree.js';
-import { GITHUB_TOKEN_KEY, pickLabelFilter, pickPullRequest } from './views/pullRequests.js';
+import { GITHUB_TOKEN_KEY, JIRA_CREDS_KEY, pickLabelFilter, pickPullRequest } from './views/pullRequests.js';
 import { Dashboard } from './views/dashboard.js';
 import { RunDetailPanel } from './views/runDetailPanel.js';
 import { StatusBar } from './statusBar.js';
@@ -58,7 +58,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (!vscode.workspace.getConfiguration('agentflow').get<boolean>('ui.openDashboardOnClick', true)) {
       return;
     }
-    Dashboard.show(client, vscode.ViewColumn.One, { onlyIfHidden: true, preserveFocus: true });
+    Dashboard.show(client, context.secrets, vscode.ViewColumn.One, { onlyIfHidden: true, preserveFocus: true });
   };
   context.subscriptions.push(
     runsView.onDidChangeVisibility((e) => revealOnOpen(e.visible)),
@@ -111,6 +111,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       );
     }),
 
+    vscode.commands.registerCommand('agentflow.setJiraCredentials', async () => {
+      const host = await vscode.window.showInputBox({
+        title: 'Jira host', prompt: 'e.g. https://acme.atlassian.net', ignoreFocusOut: true,
+      });
+      if (!host) return;
+      const email = await vscode.window.showInputBox({
+        title: 'Jira account email', ignoreFocusOut: true,
+      });
+      if (!email) return;
+      const token = await vscode.window.showInputBox({
+        title: 'Jira API token',
+        prompt: 'From id.atlassian.com → Security → API tokens. Read-only use.',
+        password: true, ignoreFocusOut: true,
+      });
+      if (!token) return;
+
+      await context.secrets.store(JIRA_CREDS_KEY, JSON.stringify({ host, email, token }));
+      void vscode.window.showInformationMessage('AgentFlow: Jira credentials saved.');
+      await vscode.commands.executeCommand('agentflow.openDashboard');
+    }),
+
     vscode.commands.registerCommand('agentflow.setGitHubToken', async () => {
       const token = await vscode.window.showInputBox({
         title: 'GitHub token for AgentFlow',
@@ -129,7 +150,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
 
     vscode.commands.registerCommand('agentflow.openDashboard', () => {
-      if (client) Dashboard.show(client);
+      if (client) Dashboard.show(client, context.secrets);
     }),
 
     vscode.commands.registerCommand('agentflow.showLog', () => output.show()),
@@ -175,7 +196,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await client.ensureConnected();
       await Promise.all([runsTree.refresh(), inbox.refresh(), statusBar.reload()]);
       if (vscode.workspace.getConfiguration('agentflow').get<boolean>('ui.openDashboardOnStart', true)) {
-        Dashboard.show(client);
+        Dashboard.show(client, context.secrets);
       }
     } catch (err) {
       log(`could not start orchestrator: ${err instanceof Error ? err.message : String(err)}`);

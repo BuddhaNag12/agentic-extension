@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
 import type {
   ApprovalRequest, EnvelopedEvent, PendingChangedNotification, Run, RunEvent,
+  WorkInboxSnapshot,
 } from '@agentflow/protocol';
+import { GITHUB_TOKEN_KEY, JIRA_CREDS_KEY } from './pullRequests.js';
 import type { OrchestratorClient } from '../client/orchestratorClient.js';
 
 /**
@@ -36,6 +38,7 @@ export class Dashboard {
   private constructor(
     private readonly panel: vscode.WebviewPanel,
     private readonly client: OrchestratorClient,
+    private readonly secrets: vscode.SecretStorage,
   ) {
     this.panel.webview.html = this.html();
 
@@ -46,10 +49,12 @@ export class Dashboard {
     };
     const onRun = () => this.scheduleSnapshot();
     const onPending = (pending: PendingChangedNotification) => void this.post({ type: 'pending', pending });
+    const onInbox = (inbox: WorkInboxSnapshot) => void this.post({ type: 'inbox', inbox });
 
     client.on('event', onEvent);
     client.on('runUpdated', onRun);
     client.on('pendingChanged', onPending);
+    client.on('workInboxChanged', onInbox);
     client.on('connected', () => void this.snapshot());
 
     this.disposables.push(
@@ -57,6 +62,7 @@ export class Dashboard {
         client.off('event', onEvent);
         client.off('runUpdated', onRun);
         client.off('pendingChanged', onPending);
+        client.off('workInboxChanged', onInbox);
       }),
       this.panel.webview.onDidReceiveMessage((m) => void this.onMessage(m)),
       this.panel.onDidDispose(() => this.dispose()),
@@ -67,6 +73,7 @@ export class Dashboard {
 
   static show(
     client: OrchestratorClient,
+    secrets: vscode.SecretStorage,
     column = vscode.ViewColumn.One,
     opts: { onlyIfHidden?: boolean; preserveFocus?: boolean } = {},
   ): void {
@@ -86,7 +93,7 @@ export class Dashboard {
       // the panel is meant to be left open.
       { enableScripts: true, retainContextWhenHidden: true },
     );
-    Dashboard.current = new Dashboard(panel, client);
+    Dashboard.current = new Dashboard(panel, client, secrets);
   }
 
   static isOpen(): boolean {
@@ -114,6 +121,22 @@ export class Dashboard {
 
         case 'reviewPr':
           return void (await vscode.commands.executeCommand('agentflow.reviewPullRequest'));
+
+        case 'refreshInbox':
+          return void (await this.loadInbox(true));
+
+        case 'openItem':
+          return void (await vscode.env.openExternal(vscode.Uri.parse(m['url'] as string)));
+
+        case 'startFromItem': {
+          // A ticket key is all `createRun` needs; the summary rides along so
+          // the run reads as the ticket rather than as an identifier.
+          await this.client.createRun({
+            ticketKey: m['key'] as string,
+            summary: m['title'] as string,
+          });
+          return void (await this.snapshot());
+        }
 
         case 'openDetail':
           return void (await vscode.commands.executeCommand('agentflow.openRun', m['runId']));
@@ -203,6 +226,7 @@ export class Dashboard {
 
       const snap: Snapshot = { runs, pending };
       await this.post({ type: 'hydrate', ...snap, selected: this.selected });
+      void this.loadInbox(false);
 
       if (this.selected) {
         const { events } = await this.client.getEvents(this.selected, 0);
@@ -210,6 +234,34 @@ export class Dashboard {
       }
     } catch {
       await this.post({ type: 'disconnected' });
+    }
+  }
+
+  /**
+   * The work inbox (§6). Cache-first by default: `force` is only the refresh
+   * button, so opening the panel never waits on two networks.
+   */
+  private async loadInbox(force: boolean): Promise<void> {
+    try {
+      const githubToken = await this.secrets.get(GITHUB_TOKEN_KEY);
+      const raw = await this.secrets.get(JIRA_CREDS_KEY);
+      const jira = raw ? (JSON.parse(raw) as { host?: string; email?: string; token?: string }) : undefined;
+
+      const inbox = await this.client.workInbox({
+        force,
+        ...(githubToken ? { githubToken } : {}),
+        ...(jira ? { jira } : {}),
+      });
+      await this.post({ type: 'inbox', inbox });
+    } catch (err) {
+      await this.post({
+        type: 'inbox',
+        inbox: {
+          jira: { items: [], problem: err instanceof Error ? err.message : String(err) },
+          github: { items: [] },
+          stale: true,
+        },
+      });
     }
   }
 
@@ -368,6 +420,43 @@ export const DASHBOARD_HTML = /* html */ `<!DOCTYPE html>
   code { font-family: var(--vscode-editor-font-family); font-size: .95em; }
 
   .empty { color: var(--vscode-descriptionForeground); font-size: .82rem; padding: 10px 0; }
+
+  /* --- work inbox -------------------------------------------------------- */
+  .section-head { display: flex; align-items: baseline; gap: 8px; }
+  .section-head h2 { margin-bottom: 10px; }
+  .staleness { font-size: .68rem; color: var(--vscode-descriptionForeground); font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .staleness.bad { color: var(--vscode-editorWarning-foreground); }
+  .linkish {
+    background: none; border: none; padding: 0; font-size: .68rem;
+    color: var(--vscode-textLink-foreground); cursor: pointer; text-transform: none; letter-spacing: 0;
+  }
+  .item {
+    display: flex; align-items: baseline; gap: 8px; padding: 6px 8px; border-radius: 4px;
+    border: 1px solid transparent; cursor: pointer;
+    /* Wraps rather than pushing the action off the right edge: this column is
+       narrow, and an action you cannot see is an action nobody uses. */
+    flex-wrap: wrap;
+  }
+  .item:hover { border-color: var(--vscode-panel-border); background: var(--vscode-editorWidget-background); }
+  .item .src {
+    font-size: .62rem; padding: 1px 5px; border-radius: 3px; white-space: nowrap;
+    border: 1px solid var(--vscode-panel-border); color: var(--vscode-descriptionForeground);
+  }
+  .item .ikey { font-weight: 600; font-size: .78rem; white-space: nowrap; }
+  .item .ititle { flex: 1 1 120px; min-width: 0; font-size: .78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .istatus { font-size: .7rem; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+  /* Always visible, not revealed on hover. Hover-only actions are invisible
+     to anyone who does not already know they are there. */
+  .item .go {
+    font-size: .68rem; padding: 1px 7px; margin-left: auto;
+    background: transparent; color: var(--vscode-textLink-foreground);
+    border-color: var(--vscode-panel-border);
+  }
+  .item:hover .go { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .problem {
+    font-size: .74rem; color: var(--vscode-editorWarning-foreground);
+    padding: 6px 8px; line-height: 1.45;
+  }
 </style></head>
 <body>
   <header>
@@ -387,6 +476,14 @@ export const DASHBOARD_HTML = /* html */ `<!DOCTYPE html>
     <div class="col">
       <h2>Needs you</h2>
       <div id="needs"></div>
+
+      <div class="section-head">
+        <h2>Your work</h2>
+        <span class="staleness" id="staleness"></span>
+        <span class="spacer"></span>
+        <button class="linkish" id="refreshInbox">Refresh</button>
+      </div>
+      <div id="work"></div>
     </div>
   </main>
 
@@ -394,7 +491,10 @@ export const DASHBOARD_HTML = /* html */ `<!DOCTYPE html>
 const vscode = acquireVsCodeApi();
 const PHASES = ['intake','preflight','context','plan','build','review','ship'];
 
-let state = vscode.getState() || { runs: [], pending: { questions: [], approvals: [] }, selected: null };
+let state = vscode.getState() || {
+  runs: [], pending: { questions: [], approvals: [] }, selected: null,
+  inbox: { jira: { items: [] }, github: { items: [] }, stale: true },
+};
 let t0 = null;
 
 const $ = (id) => document.getElementById(id);
@@ -482,6 +582,56 @@ function renderNeeds() {
   el.innerHTML = gates + qs;
 }
 
+function ago(iso) {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return '';
+  const m = Math.max(1, Math.round((Date.now() - then) / 60000));
+  if (m < 60) return m + 'm';
+  const h = Math.round(m / 60);
+  return h < 48 ? h + 'h' : Math.round(h / 24) + 'd';
+}
+
+function renderWork() {
+  const inbox = state.inbox || { jira: { items: [] }, github: { items: [] }, stale: true };
+  const items = [...(inbox.jira.items || []), ...(inbox.github.items || [])]
+    .sort((a, b) => Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0));
+
+  // Staleness rather than silence: "you have no work" and "I could not ask"
+  // are different answers, and only one of them means you can stop looking.
+  const fetched = Math.max(inbox.jira.fetchedAt || 0, inbox.github.fetchedAt || 0);
+  const stale = $('staleness');
+  if (!fetched) {
+    stale.textContent = 'not fetched yet';
+    stale.className = 'staleness';
+  } else {
+    const mins = Math.round((Date.now() - fetched) / 60000);
+    stale.textContent = mins < 1 ? 'just now' : mins + 'm ago';
+    stale.className = 'staleness' + (mins > 20 ? ' bad' : '');
+  }
+
+  const problems = [inbox.jira.problem, inbox.github.problem].filter(Boolean)
+    .map((p) => '<div class="problem">' + esc(p) + '</div>').join('');
+
+  const el = $('work');
+  if (!items.length) {
+    el.innerHTML = problems || '<div class="empty">Nothing assigned to you, and no reviews waiting.</div>';
+    return;
+  }
+
+  el.innerHTML = problems + items.map((it) => {
+    const isTicket = it.source === 'jira';
+    return '<div class="item" data-url="' + esc(it.url) + '">' +
+      '<span class="src">' + (isTicket ? 'jira' : 'pr') + '</span>' +
+      '<span class="ikey">' + esc(it.key) + '</span>' +
+      '<span class="ititle">' + esc(it.title) + '</span>' +
+      '<span class="istatus">' + esc(it.status) + (it.updatedAt ? ' · ' + ago(it.updatedAt) : '') + '</span>' +
+      (isTicket
+        ? '<button class="go ghost" data-startkey="' + esc(it.key) + '" data-starttitle="' + esc(it.title) + '">Start</button>'
+        : '<button class="go ghost" data-reviewpr="1">Review</button>') +
+    '</div>';
+  }).join('');
+}
+
 function renderCounts() {
   const runs = state.runs;
   const running = runs.filter((r) => r.status === 'running').length;
@@ -540,7 +690,7 @@ function appendActivity(events, reset) {
 }
 
 function renderAll() {
-  renderCounts(); renderRuns(); renderNeeds();
+  renderCounts(); renderRuns(); renderNeeds(); renderWork();
   vscode.setState(state);
 }
 
@@ -551,6 +701,10 @@ document.addEventListener('click', (ev) => {
 
   if (t.id === 'start') return send('start');
   if (t.id === 'reviewPr') return send('reviewPr');
+  if (t.id === 'refreshInbox') { $('staleness').textContent = 'refreshing…'; return send('refreshInbox'); }
+  if (d.startkey) { ev.stopPropagation(); return send('startFromItem', { key: d.startkey, title: d.starttitle }); }
+  if (d.reviewpr) { ev.stopPropagation(); return send('reviewPr'); }
+  if (t.dataset.url) return send('openItem', { url: t.dataset.url });
   if (d.detail) { ev.stopPropagation(); return send('openDetail', { runId: d.detail }); }
   if (d.cancel) { ev.stopPropagation(); return send('cancel', { runId: d.cancel }); }
   if (d.decide) return send('decide', { decision: d.decide, approvalId: d.a, runId: d.r, gate: d.g });
@@ -567,6 +721,8 @@ window.addEventListener('message', (ev) => {
     renderAll();
   } else if (m.type === 'pending') {
     state.pending = m.pending; renderNeeds(); vscode.setState(state);
+  } else if (m.type === 'inbox') {
+    state.inbox = m.inbox; renderWork(); vscode.setState(state);
   } else if (m.type === 'activity') {
     appendActivity(m.events || [], m.reset);
   } else if (m.type === 'disconnected') {

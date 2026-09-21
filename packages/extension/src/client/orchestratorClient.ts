@@ -9,7 +9,8 @@ import {
   Methods, Notifications, PROTOCOL_VERSION,
   type EnvelopedEvent, type HandshakeResult, type ListLabelsParams, type ListLabelsResult,
   type ListPullRequestsParams, type ListPullRequestsResult,
-  type PendingChangedNotification, type Run,
+  type PendingChangedNotification, type RefreshInboxParams, type Run,
+  type WorkInboxSnapshot,
 } from '@agentflow/protocol';
 import { readLiveLock, workspacePaths } from '@agentflow/orchestrator';
 
@@ -63,6 +64,7 @@ export class OrchestratorClient extends EventEmitter {
     this.connection.onNotification(Notifications.event, (p: EnvelopedEvent) => this.emit('event', p));
     this.connection.onNotification(Notifications.runUpdated, (p: { run: Run }) => this.emit('runUpdated', p.run));
     this.connection.onNotification(Notifications.pendingChanged, (p: PendingChangedNotification) => this.emit('pendingChanged', p));
+    this.connection.onNotification(Notifications.workInboxChanged, (p: WorkInboxSnapshot) => this.emit('workInboxChanged', p));
     this.connection.onClose(() => this.handleDrop());
     this.socket.on('error', (err) => this.log(`socket error: ${err.message}`));
     this.connection.listen();
@@ -164,6 +166,10 @@ export class OrchestratorClient extends EventEmitter {
 
   decideApproval(params: { runId: string; approvalId: string; gate: string; decision: string; note?: string }): Promise<unknown> {
     return this.request(Methods.decideApproval, params);
+  }
+
+  workInbox(params: RefreshInboxParams): Promise<WorkInboxSnapshot> {
+    return this.request(Methods.workInbox, params);
   }
 
   listPullRequests(params: ListPullRequestsParams): Promise<ListPullRequestsResult> {

@@ -11,3 +11,5 @@ export * from './git/worktree.js';
 export * from './git/exec.js';
 export * from './integrations/github.js';
 export * from './integrations/githubAuth.js';
+export * from './integrations/jira.js';
+export * from './integrations/workInbox.js';

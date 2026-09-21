@@ -10,7 +10,8 @@ import {
   Methods, Notifications, PROTOCOL_VERSION,
   type AnswerQuestionParams, type CreateRunParams, type DecideApprovalParams,
   type GetEventsParams, type HandshakeParams, type HandshakeResult,
-  type ListLabelsParams, type ListPullRequestsParams, type RunIdParams,
+  type ListLabelsParams, type ListPullRequestsParams, type RefreshInboxParams,
+  type RunIdParams,
 } from '@agentflow/protocol';
 import { HitlBroker } from './hitl.js';
 import { clearLock, writeLock } from './lock.js';
@@ -20,6 +21,8 @@ import { RealRunDriver } from './runs/realDriver.js';
 import { RunStore } from './runs/store.js';
 import { GitHubClient, type RepoCoordinates } from './integrations/github.js';
 import { detectRepo, resolveGitHubToken, tokenSetupHint } from './integrations/githubAuth.js';
+import { JiraClient, jiraSetupHint, resolveJiraConfig } from './integrations/jira.js';
+import { WorkInbox, inboxCachePath } from './integrations/workInbox.js';
 import { Scheduler, limitsForMachine } from './scheduler.js';
 
 export const ORCHESTRATOR_VERSION = '0.0.1';
@@ -43,6 +46,9 @@ export class Orchestrator {
   private readonly store: RunStore;
   private readonly scheduler: Scheduler;
   private readonly hitl = new HitlBroker();
+  private readonly inbox: WorkInbox;
+  /** Credentials the extension passes in; the daemon never persists them. */
+  private creds: RefreshInboxParams = { force: false };
   private readonly driver: RunDriver;
   private server?: Server;
   private idleTimer?: NodeJS.Timeout;
@@ -65,6 +71,16 @@ export class Orchestrator {
           this.scheduler,
           (runId, effects) => this.handleEffects(runId, effects),
         );
+
+    this.inbox = new WorkInbox({
+      cacheFile: inboxCachePath(paths.agentflowDir),
+      providers: {
+        jira: () => this.jira(),
+        github: () => this.github(this.creds.githubToken),
+      },
+    });
+    this.inbox.on('changed', (snapshot) =>
+      this.broadcast(Notifications.workInboxChanged, snapshot));
 
     this.store.on('event', (payload) => {
       // A question reaching the log must also reach the inbox, whichever phase
@@ -108,6 +124,7 @@ export class Orchestrator {
   }
 
   shutdown(): void {
+    this.inbox.stop();
     this.driver.cancelAll();
     this.hitl.dispose();
     if (this.idleTimer) clearTimeout(this.idleTimer);
@@ -277,6 +294,19 @@ export class Orchestrator {
       }
     });
 
+    c.onRequest(Methods.workInbox, async (p: RefreshInboxParams) => {
+      // The extension holds the credentials; it hands them over with the
+      // request, and the daemon keeps them only for as long as it is up.
+      this.creds = p;
+      // Cache first (§6.4): the list renders instantly and refreshes behind
+      // it. Only an explicit refresh waits for the network.
+      if (!p.force) {
+        this.inbox.start();
+        return this.inbox.snapshot();
+      }
+      return this.inbox.refreshNow();
+    });
+
     c.onRequest(Methods.listLabels, async (p: ListLabelsParams) => {
       const gh = await this.github(p.token);
       if ('problem' in gh) return { labels: [], problem: gh.problem };
@@ -375,6 +405,16 @@ export class Orchestrator {
 
     log(`github: ${repo.owner}/${repo.name} via ${resolved.from}`);
     return { client: new GitHubClient({ token: resolved.token }), repo };
+  }
+
+  /** A Jira client for this workspace, or why there is not one. */
+  private async jira(): Promise<{ client: JiraClient } | { problem: string }> {
+    const config = resolveJiraConfig({
+      agentflowDir: this.paths.agentflowDir,
+      ...(this.creds.jira ? { stored: this.creds.jira } : {}),
+    });
+    if (!config) return { problem: jiraSetupHint() };
+    return { client: new JiraClient(config) };
   }
 
   private pendingPayload() {

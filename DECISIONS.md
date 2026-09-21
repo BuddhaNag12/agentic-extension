@@ -943,3 +943,47 @@ focus into the editor, which is the opposite of what a sidebar click asks for.
 `agentflow.ui.openDashboardOnClick` turns it off, because an editor tab that
 appears when you touch the sidebar is exactly the kind of helpfulness that
 becomes irritating on the fiftieth time.
+
+## Decisions made building the Work Inbox
+
+### D65 — Cache first, and never an empty list for a source that failed
+
+§6.4's three properties are each a way this kind of thing normally goes wrong,
+and the poller implements all three:
+
+- **The list renders from disk before anything is fetched.** An inbox that is
+  blank for two seconds every morning is one you stop trusting before you stop
+  opening. Only the explicit Refresh waits on the network.
+- **A source that fails keeps its last good items** and gains a `problem`.
+  "You have no work" and "I could not ask" are different answers, and only one
+  of them means you can stop looking — so the UI shows the stale list, when it
+  was fetched, and what went wrong.
+- **Per-source intervals with jitter** — 300 s for tickets, 120 s for reviews,
+  because tickets move more slowly than a review queue — so two sources do not
+  stampede together on every tick. The timers are `unref`'d: a poll must never
+  be the reason the daemon stays alive.
+
+### D66 — The host is the team's; the credentials are yours
+
+`.agentflow/config.json` can supply `integrations.jira.host`, because it is the
+same for everyone on the team and belongs in the repo. Credentials are read
+only from `SecretStorage` or the environment, never from a repo file, and the
+resolver needs all three before it reports a configuration at all — a partial
+one produces a 401 that looks like a wrong password.
+
+The extension holds the secrets and passes them with the request; the daemon
+keeps them in memory for as long as it is up and never writes them. A malformed
+`config.json` returns undefined rather than throwing, because a typo in a
+config file should not take the inbox down.
+
+### D67 — What the browser caught in the work list
+
+Two things, both only visible on screen:
+
+- The row actions were revealed on hover. An action you cannot see is an action
+  nobody uses, so they are always visible now, and only their emphasis changes
+  on hover.
+- In the dashboard's narrow right column, the action was pushed **off the right
+  edge** entirely — present in the DOM, unreachable. The row wraps now, and a
+  check that every action's bounding box lies inside the viewport is what
+  confirmed it rather than a glance.

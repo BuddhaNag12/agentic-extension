@@ -104,6 +104,10 @@
       {
         "command": "agentflow.setGitHubToken",
         "title": "AgentFlow: Set GitHub Token"
+      },
+      {
+        "command": "agentflow.setJiraCredentials",
+        "title": "AgentFlow: Set Jira Credentials"
       }
     ],
     "menus": {

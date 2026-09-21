@@ -12,6 +12,8 @@ import type { OrchestratorClient } from '../client/orchestratorClient.js';
  */
 
 export const GITHUB_TOKEN_KEY = 'agentflow.githubToken';
+/** JSON: `{ host, email, token }`. One key, because they are useless apart. */
+export const JIRA_CREDS_KEY = 'agentflow.jiraCredentials';
 
 type FilterChoice = vscode.QuickPickItem & { filter?: PrLabelFilter; pickLabels?: boolean };
 

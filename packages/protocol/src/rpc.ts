@@ -98,6 +98,44 @@ export const ListLabelsResult = z.object({
   problem: z.string().optional(),
 });
 
+/** A ticket assigned to you, or a PR waiting on your review (§6.1). */
+export const WorkItem = z.object({
+  id: z.string(),
+  source: z.enum(['jira', 'github']),
+  key: z.string(),
+  title: z.string(),
+  url: z.string(),
+  status: z.string(),
+  labels: z.array(z.string()),
+  updatedAt: z.string(),
+  detail: z.string().optional(),
+  draft: z.boolean(),
+});
+
+export const WorkSourceState = z.object({
+  items: z.array(WorkItem),
+  fetchedAt: z.number().optional(),
+  /** Why the last attempt failed. The items may still be good (§6.4). */
+  problem: z.string().optional(),
+});
+
+export const WorkInboxSnapshot = z.object({
+  jira: WorkSourceState,
+  github: WorkSourceState,
+  stale: z.boolean(),
+});
+
+export const RefreshInboxParams = z.object({
+  /** Credentials the extension holds in SecretStorage; the daemon has none. */
+  githubToken: z.string().optional(),
+  jira: z.object({
+    host: z.string().optional(),
+    email: z.string().optional(),
+    token: z.string().optional(),
+  }).optional(),
+  force: z.boolean().default(false),
+});
+
 export const RunIdParams = z.object({ runId: RunId });
 export const ListRunsResult = z.object({ runs: z.array(Run) });
 
@@ -136,12 +174,14 @@ export const Methods = {
   listPending: 'hitl/pending',
   listWorkflows: 'workflow/list',
   listPullRequests: 'github/pulls',
+  workInbox: 'inbox/work',
   listLabels: 'github/labels',
 } as const;
 
 // --- notifications (orchestrator → extension) ------------------------------
 
 export const Notifications = {
+  workInboxChanged: 'inbox/changed',
   event: 'run/event',
   runUpdated: 'run/updated',
   pendingChanged: 'hitl/pendingChanged',
@@ -156,6 +196,9 @@ export type RunEventNotification = EnvelopedEvent;
 
 export type HandshakeParams = z.infer<typeof HandshakeParams>;
 export type HandshakeResult = z.infer<typeof HandshakeResult>;
+export type WorkItem = z.infer<typeof WorkItem>;
+export type WorkInboxSnapshot = z.infer<typeof WorkInboxSnapshot>;
+export type RefreshInboxParams = z.infer<typeof RefreshInboxParams>;
 export type ListPullRequestsParams = z.infer<typeof ListPullRequestsParams>;
 export type ListPullRequestsResult = z.infer<typeof ListPullRequestsResult>;
 export type ListLabelsParams = z.infer<typeof ListLabelsParams>;
