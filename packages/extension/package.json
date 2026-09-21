@@ -56,10 +56,15 @@
     "viewsWelcome": [
       {
         "view": "agentflow.runs",
-        "contents": "No runs yet.\n[Start a run](command:agentflow.createRun)"
+        "contents": "No runs yet.\n[Open the dashboard](command:agentflow.openDashboard)\n[Start a run](command:agentflow.createRun)\n[Review a pull request](command:agentflow.reviewPullRequest)"
       }
     ],
     "commands": [
+      {
+        "command": "agentflow.openDashboard",
+        "title": "AgentFlow: Open Dashboard",
+        "icon": "$(dashboard)"
+      },
       {
         "command": "agentflow.createRun",
         "title": "AgentFlow: Start Run from Ticket",
@@ -104,6 +109,11 @@
     "menus": {
       "view/title": [
         {
+          "command": "agentflow.openDashboard",
+          "when": "view == agentflow.runs",
+          "group": "navigation@0"
+        },
+        {
           "command": "agentflow.createRun",
           "when": "view == agentflow.runs",
           "group": "navigation@1"
@@ -139,6 +149,11 @@
           "type": "boolean",
           "default": true,
           "description": "Spawn the orchestrator daemon on activation."
+        },
+        "agentflow.ui.openDashboardOnStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open the AgentFlow dashboard in an editor tab when the orchestrator connects."
         }
       }
     }

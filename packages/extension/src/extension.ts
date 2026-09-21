@@ -5,6 +5,7 @@ import { OrchestratorClient } from './client/orchestratorClient.js';
 import { RunsTreeProvider } from './views/runsTree.js';
 import { InboxTreeProvider, type InboxNode } from './views/inboxTree.js';
 import { GITHUB_TOKEN_KEY, pickLabelFilter, pickPullRequest } from './views/pullRequests.js';
+import { Dashboard } from './views/dashboard.js';
 import { RunDetailPanel } from './views/runDetailPanel.js';
 import { StatusBar } from './statusBar.js';
 
@@ -102,6 +103,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       void vscode.window.showInformationMessage('AgentFlow: GitHub token saved.');
     }),
 
+    vscode.commands.registerCommand('agentflow.openDashboard', () => {
+      if (client) Dashboard.show(client);
+    }),
+
     vscode.commands.registerCommand('agentflow.showLog', () => output.show()),
     vscode.commands.registerCommand('agentflow.restartOrchestrator', async () => {
       // A real restart, which means the daemon exits. The old version only
@@ -144,6 +149,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     try {
       await client.ensureConnected();
       await Promise.all([runsTree.refresh(), inbox.refresh(), statusBar.reload()]);
+      if (vscode.workspace.getConfiguration('agentflow').get<boolean>('ui.openDashboardOnStart', true)) {
+        Dashboard.show(client);
+      }
     } catch (err) {
       log(`could not start orchestrator: ${err instanceof Error ? err.message : String(err)}`);
       void vscode.window.showErrorMessage('AgentFlow: orchestrator failed to start. See the AgentFlow output channel.');

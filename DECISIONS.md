@@ -884,3 +884,46 @@ someone to hunt a missing PR.
 — fetching `pull/N/head` into a worktree, claim conformance, the local gate run
 on the merge-base delta — is not. The command says so rather than starting
 something that quietly does nothing.
+
+## Decisions made moving the UI into an editor tab
+
+### D61 — The dashboard is an editor tab; the trees stay as a launcher
+
+§12.1 lists both a Runs TreeView and a Dashboard webview, and the split is
+about width rather than preference. A swimlane per run with its seven phases
+lit needs room; a 300px sidebar column turns the pipeline into a scrollbar and
+the summary into an ellipsis. So the dashboard — runs, the decisions waiting on
+you, and the live activity line — opens in an editor tab, on connect by default
+(`agentflow.ui.openDashboardOnStart`).
+
+The trees are **kept**, not replaced. They carry the "needs you" badge, they
+are where the welcome view and the title-bar button live, and removing a
+working surface to make a point about a new one costs someone their habit.
+
+Run detail moved to `ViewColumn.Beside` for the same reason: opening a timeline
+on top of the dashboard replaces the thing you were watching.
+
+### D62 — Plain HTML, not §12.4's React + Vite, for now
+
+The run detail panel already established the pattern — a nonce CSP, `--vscode-*`
+variables throughout, message passing — and a second page does not justify
+introducing the repo's only bundler-for-a-view. §12.4's real requirements are
+theming (done), state persistence across a hidden panel (`setState`, done) and
+**virtualizing the timeline**, which is the one this cannot do: tens of
+thousands of events in a plain list will jank. That is the trigger to revisit,
+not the framework.
+
+### D63 — What the browser caught that reading would not have
+
+The page was rendered outside VS Code with a stubbed `acquireVsCodeApi` and a
+fallback palette, and three things only showed up on screen:
+
+- `'\\u2192'` inside a template literal reaches the page as the *text*
+  `\u2192`. Literal `→` has no such failure mode.
+- A backtick inside a CSS comment terminates the template literal. TypeScript
+  caught that one, but only because it was looked at again.
+- Two columns at 620px squeezed the runs to nothing: the right column's
+  `minmax(300px, …)` minimum wins and the phase pills clip. An editor tab is
+  routinely split or narrow, so below 860px they stack — with
+  `align-content: start`, without which the grid stretches its rows and leaves
+  a dead gap between the activity list and the decisions.

@@ -57,6 +57,10 @@ exercised deterministically and for free.
 - Append-only JSONL event log per run; all state derived by replay
 - Run state machine with the §5.1 transitions, three human gates, loop limits
   and escalation
+- **Dashboard** (§12.1) — every run as a swimlane with its seven phases lit,
+  the decisions waiting on you with inline approve/answer, and the selected
+  run's live activity, in one editor tab. Opens on connect; the runs tree and
+  status bar stay for the badge and quick access
 - Runs tree, inbox, status bar, and a live run-detail timeline
 - Schema 2.0.0, with pre-2.0.0 logs migrated **on read** and never rewritten —
   ten legacy phase names become steps, and a dropped event is counted and

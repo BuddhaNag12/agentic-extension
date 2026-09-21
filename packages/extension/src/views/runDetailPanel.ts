@@ -50,7 +50,9 @@ export class RunDetailPanel {
     const panel = vscode.window.createWebviewPanel(
       'agentflow.runDetail',
       `${ticketKey} — AgentFlow`,
-      vscode.ViewColumn.Active,
+      // Beside, not Active: the dashboard is meant to be left open, and
+      // opening a timeline on top of it replaces the thing you were watching.
+      vscode.ViewColumn.Beside,
       { enableScripts: true, retainContextWhenHidden: true },
     );
     RunDetailPanel.panels.set(runId, new RunDetailPanel(panel, runId, client));
