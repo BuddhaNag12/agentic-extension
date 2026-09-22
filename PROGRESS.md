@@ -4,8 +4,8 @@ Where AgentFlow actually stands. `README.md` describes what the thing *is*;
 `DECISIONS.md` records *why* each choice was made. This file is the running
 answer to "what is done, what is next, and what is blocked on me".
 
-Last updated: 2026-09-21 · `78482f5` · 431 tests across 24 files, typecheck
-clean, `.vsix` 990 KB.
+Last updated: 2026-09-22 · `f18a233` · 512 tests across 28 files, typecheck
+clean, `.vsix` 1002 KB.
 
 ---
 
@@ -16,7 +16,7 @@ clean, `.vsix` 990 KB.
 | Pipeline (7 phases, 23 steps) | Complete, with `Step` granularity and G1/G2/G3 at step exits |
 | Event log + replay | Complete. Schema 2.0.0; pre-2.0.0 migrated on read, never rewritten |
 | Transport (JSON-RPC over socket) | Complete, with version handshake and stale-build detection |
-| Daemon lifecycle | Complete — survives window reloads (fixed 2026-09-21) |
+| Daemon lifecycle | Complete — survives reloads, exits when idle, starts only where used |
 | Git worktrees, checkpoints, rebase | Complete |
 | Gate adapters + runner | Complete for Node/TS; five adapters wired |
 | Repair loop | Complete, with thrash detection and budget enforcement |
@@ -24,7 +24,9 @@ clean, `.vsix` 990 KB.
 | Dashboard (editor tab webview) | Complete |
 | Work Inbox (Jira + GitHub polling) | Complete |
 | PR review pipeline | Complete end to end |
-| Publishing findings to GitHub | **Not started** |
+| Ticket → repository routing | Complete — a run's repo need no longer be the workspace |
+| Run state location | Outside the working tree, per-user, with migration |
+| Publishing findings to GitHub | Module complete and tested — **no caller wires it up** |
 | Eval harness (§18.3) | **Not started** |
 
 ---
@@ -63,7 +65,25 @@ its phases lit, decisions waiting on you with inline approve/answer, and the
 selected run's live activity. The Work Inbox polls Jira (300s) and GitHub
 (120s) with jitter, caches to disk, and keeps the last good result on failure.
 
-### Reliability work, 2026-09-21
+### Landed 2026-09-22 (`d60ab0c`, not mine)
+
+- **State moved out of the working tree.** `.agentflow/` in a repository is
+  now committed, read-only config; runs, cache, lock and log live per-user
+  under `~/Library/Application Support/AgentFlow/workspaces/<name>-<hash>`,
+  with `migrateLegacyState()` moving an older build's history across. The
+  built-in workflows are no longer seeded into the repo.
+- **Ticket → repository routing.** A run still targets exactly one repo, but
+  it no longer has to be the workspace: a registry routes by Jira project key
+  or label, and falls back to the old behaviour loudly.
+- **Publishing findings to GitHub**, as a module. `APPROVE` is unrepresentable
+  in the type and re-checked at runtime; deduplication is a three-review
+  window keyed on the head sha recorded in a marker comment; a rejected
+  line anchor degrades to a summary entry rather than dropping the finding.
+- **`git -C <dir>` recognised by the bash guardrail.** Literal prefix matching
+  missed every one of them, and a live harvest spent its entire exploration
+  budget on refusals and returned an empty touch set.
+
+### Reliability work, 2026-09-21 and 09-22
 Three defects found by reading the extension host log rather than by a failing
 test — the class of bug that a green suite cannot see.
 
@@ -87,6 +107,25 @@ test — the class of bug that a green suite cannot see.
   its standard streams. `daemonSurvival.test.ts` spawns the real entry point,
   closes the pipes underneath it and reconnects; verified to fail against the
   unfixed daemon.
+- **The daemon followed you into every project** (`a49f6cc`). Activation is
+  `onStartupFinished`, which fires in every window in every project, and it
+  connected unconditionally — a daemon process per repository, for
+  repositories that had never heard of the tool. Four were running. Autostart
+  now requires evidence of prior use; commands still connect lazily, so a
+  fresh repository starts on first use.
+- **Nothing ever told a daemon to stop** (`a49f6cc`). Detached so a reload
+  cannot kill a run, it outlived being disabled or uninstalled indefinitely,
+  holding a socket and a lock. It now exits after ten minutes with no clients
+  and nothing `running`; a reload reattaches in seconds, so the grace period
+  distinguishes the two without a signal `deactivate()` cannot give. The idle
+  timer had been declared and cleared since the daemon was written, and never
+  once set.
+- **The suite wrote into real application data** (`f18a233`). `workspacePaths()`
+  resolves under the real state root whatever workspace it is handed, so tests
+  building paths from temp directories — and tests spawning real daemons —
+  wrote to `~/Library/Application Support/AgentFlow`. Two hundred directories,
+  1.8MB, had accumulated. `AGENTFLOW_STATE_DIR` is now set through `test.env`,
+  which reaches worker processes and anything they spawn.
 
 ---
 
@@ -94,10 +133,11 @@ test — the class of bug that a green suite cannot see.
 
 In the order I would take them.
 
-1. **Publish findings as a GitHub review.** The reviewer produces findings and
-   nothing carries them to the PR. Read-only by construction today, which was
-   deliberate — a module that cannot write cannot be made to write by
-   accident — so this is a new, human-triggered surface. Never `APPROVE`.
+1. **Wire publishing to a command.** `publishReview.ts` is complete and
+   tested — and has no caller anywhere: no RPC method, no daemon handler, no
+   command. The capability exists and cannot be reached from the UI, which is
+   the least useful state for it to be in and the cheapest thing on this list
+   to fix.
 2. **§7.3 merge-base gate delta.** Gate results are absolute; a review wants
    what *this PR* changed, not what the branch inherited.
 3. **§5.7's four narrow review passes.** One pass exists. The remaining three
@@ -146,5 +186,9 @@ task. Nothing proceeds on them without an answer.
   extension-host startup. A reload that races an install lands on the wrong
   side of it and the extension appears not to have installed at all. Confirm
   with `grep -l buddhanag12.agentflow ~/Library/Application\ Support/Code/logs/*/window*/exthost/exthost.log`.
-- **The daemon's log is `.agentflow/orchestrator.log`.** When a daemon dies,
-  read it first. Before it existed there was no record anywhere of why.
+- **The daemon's log moved with the rest of the state.** It is now
+  `~/Library/Application Support/AgentFlow/workspaces/<name>-<hash>/orchestrator.log`
+  (`workspacePaths(root).daemonLogFile`). When a daemon dies, read it first.
+- **A daemon can outlive the extension.** It is detached on purpose. If one
+  seems stuck, `ps -Ao pid,command | grep dist/orchestrator.js` will find it;
+  it should exit on its own ten minutes after the last client leaves.

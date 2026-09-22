@@ -1245,7 +1245,7 @@ it until ship is the failure this line exists to prevent.
 
 ## Decisions made stopping the daemon from following you around
 
-### D75 — Prior use is the opt-in; activation alone is not
+### D80 — Prior use is the opt-in; activation alone is not
 
 The extension activates on `onStartupFinished`, which fires in every window in
 every project, and activation connected unconditionally. A connection spawns a
@@ -1263,7 +1263,7 @@ Waiting costs nothing. Every command connects lazily, so the first command run
 in a fresh repository starts the daemon, and the workspace starts on its own
 from then on.
 
-### D76 — The daemon leaves when nobody is listening
+### D81 — The daemon leaves when nobody is listening
 
 `idleTimer` had been declared and cleared since the daemon was written, and
 never once set — the intent was there, the wiring was not.
@@ -1282,7 +1282,7 @@ reload from an uninstall and so cannot be the signal.
 person, its state is on disk, and replay restores it when someone comes back.
 A `running` run does, and re-arms rather than exiting.
 
-### D77 — The suite gets its own state root
+### D82 — The suite gets its own state root
 
 Moving state out of the working tree moved it into the developer's real
 application data, and the tests went with it. `workspacePaths()` resolves
