@@ -2,7 +2,13 @@ node_modules/
 dist/
 out/
 *.tsbuildinfo
-.agentflow/
+# `.agentflow/` holds committed inputs — policy.json, config.json, workflows/.
+# It was ignored when it also held runs and logs; those now live outside the
+# working tree, so ignoring it would mean config that can never be committed.
+.agentflow/runs/
+.agentflow/cache/
+.agentflow/*.log
+.agentflow/*.lock
 *.vsix
 .DS_Store
 agentflow.vsix
