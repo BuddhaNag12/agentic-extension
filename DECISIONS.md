@@ -1281,3 +1281,20 @@ reload from an uninstall and so cannot be the signal.
 `waiting_human` deliberately does not hold it open: that run is parked on a
 person, its state is on disk, and replay restores it when someone comes back.
 A `running` run does, and re-arms rather than exiting.
+
+### D77 — The suite gets its own state root
+
+Moving state out of the working tree moved it into the developer's real
+application data, and the tests went with it. `workspacePaths()` resolves
+`stateDir` under `stateRoot()` whatever workspace it is given, so a test
+building paths from a temp directory still landed in
+`~/Library/Application Support/AgentFlow`, and a test spawning a real daemon
+wrote there. Two hundred directories had accumulated before anyone looked.
+
+`AGENTFLOW_STATE_DIR` is set through `test.env` rather than in a setup file,
+because it has to reach the worker processes and the daemons they spawn; a
+`globalSetup` mutation of `process.env` does not reliably survive the hop into
+a worker. `globalSetup` only creates and removes the directory.
+
+Set once in the config, this covers every test written from here on rather
+than relying on each one to remember.
