@@ -149,6 +149,10 @@ export class Orchestrator {
     connection.onClose(() => this.detach(connection));
     socket.on('error', () => this.detach(connection));
     connection.listen();
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      delete this.idleTimer;
+    }
     log(`client attached (${this.clients.size} total)`);
   }
 
@@ -156,6 +160,40 @@ export class Orchestrator {
     if (!this.clients.delete(connection)) return;
     connection.dispose();
     log(`client detached (${this.clients.size} remaining)`);
+    this.armIdleShutdown();
+  }
+
+  /**
+   * Leave once nobody is listening and nothing is running.
+   *
+   * The daemon is detached so a window reload cannot kill a run, which also
+   * means nothing ever told it to stop: disabling or uninstalling the
+   * extension left it alive indefinitely, holding a socket and a lock for a
+   * client that was never coming back.
+   *
+   * A reload reattaches within seconds, so the grace period distinguishes the
+   * two on its own — no signal from the extension required, which is just as
+   * well, because `deactivate()` cannot tell a reload from an uninstall.
+   *
+   * A `running` run keeps us here. `waiting_human` does not: it is parked on a
+   * person, its state is on disk, and replay restores it when someone returns.
+   */
+  private armIdleShutdown(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    if (this.clients.size > 0) return;
+
+    this.idleTimer = setTimeout(() => {
+      if (this.clients.size > 0) return;
+      if (this.store.list().some((r) => r.status === 'running')) {
+        // Check again later rather than abandoning a run mid-flight.
+        this.armIdleShutdown();
+        return;
+      }
+      log(`no clients for ${IDLE_SHUTDOWN_MS / 1000}s and nothing running; exiting`);
+      this.shutdown();
+      process.exit(0);
+    }, IDLE_SHUTDOWN_MS);
+    this.idleTimer.unref();
   }
 
   private register(c: MessageConnection): void {
@@ -490,6 +528,9 @@ function message(err: unknown): string {
 }
 
 const MAX_LOG_BYTES = 2_000_000;
+
+/** Long enough to cover a window reload, short enough to not linger. */
+export const IDLE_SHUTDOWN_MS = Number(process.env['AGENTFLOW_IDLE_SHUTDOWN_MS'] ?? 10 * 60_000);
 let logFile: string | undefined;
 
 /**

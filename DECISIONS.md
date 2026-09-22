@@ -1242,3 +1242,42 @@ repository is not a heuristic.
 Every run logs which repo it chose and why, and says so when more than one
 entry claimed the ticket. Branching the wrong repository and not discovering
 it until ship is the failure this line exists to prevent.
+
+## Decisions made stopping the daemon from following you around
+
+### D75 — Prior use is the opt-in; activation alone is not
+
+The extension activates on `onStartupFinished`, which fires in every window in
+every project, and activation connected unconditionally. A connection spawns a
+daemon, so opening any repository at all got one — four were running for
+repositories that had never been used with AgentFlow, and before D-state moved
+out of the tree each of them also got a `.agentflow/` directory, a lockfile, a
+log and an inbox cache.
+
+`shouldAutoStart` now requires evidence of prior use, which has two shapes now
+that state lives outside the working tree: a state directory, for a workspace
+that has run something, or an in-repo `.agentflow/`, for one that commits
+workflows or a repo registry without having run anything yet.
+
+Waiting costs nothing. Every command connects lazily, so the first command run
+in a fresh repository starts the daemon, and the workspace starts on its own
+from then on.
+
+### D76 — The daemon leaves when nobody is listening
+
+`idleTimer` had been declared and cleared since the daemon was written, and
+never once set — the intent was there, the wiring was not.
+
+Nothing ever told the daemon to stop. It is detached so a window reload cannot
+kill a run, which also means disabling or uninstalling the extension left it
+running indefinitely, holding a socket and a lock for a client that was never
+coming back. Making it survive reloads harder (D74) made this worse.
+
+It now exits after ten minutes with no clients attached and nothing `running`.
+A reload reattaches in seconds, so the grace period tells the two apart by
+itself — which is necessary, because `deactivate()` cannot distinguish a
+reload from an uninstall and so cannot be the signal.
+
+`waiting_human` deliberately does not hold it open: that run is parked on a
+person, its state is on disk, and replay restores it when someone comes back.
+A `running` run does, and re-arms rather than exiting.

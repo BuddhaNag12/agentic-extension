@@ -44,9 +44,14 @@ afterEach(async () => {
   if (root) rmSync(root, { recursive: true, force: true });
 });
 
-function startDaemon(workspace: string): Promise<{ proc: ChildProcess; endpoint: string }> {
+function startDaemon(
+  workspace: string,
+  env: Record<string, string> = {},
+): Promise<{ proc: ChildProcess; endpoint: string }> {
   const proc = spawn(process.execPath, [entry, '--workspace', workspace], {
     detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+    // An idle daemon must not outlive the test that spawned it.
+    env: { ...process.env, AGENTFLOW_IDLE_SHUTDOWN_MS: '600000', ...env },
   });
   proc.unref();
   return new Promise((resolve, reject) => {
@@ -65,11 +70,11 @@ function startDaemon(workspace: string): Promise<{ proc: ChildProcess; endpoint:
   });
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+function withTimeout<T>(p: Promise<T>, ms: number, what: string, hint: string): Promise<T> {
   return Promise.race([
     p,
     new Promise<never>((_, rej) =>
-      setTimeout(() => rej(new Error(`${what} did not complete in ${ms}ms — the daemon is probably dead`)), ms)),
+      setTimeout(() => rej(new Error(`${what} did not complete in ${ms}ms — ${hint}`)), ms)),
   ]);
 }
 
@@ -86,7 +91,7 @@ async function handshake(endpoint: string, workspace: string): Promise<Handshake
       conn.sendRequest<HandshakeResult>(Methods.handshake, {
         protocolVersion: PROTOCOL_VERSION, workspaceRoot: workspace, clientId: 'survival-test',
       }),
-      5_000, 'handshake',
+      5_000, 'handshake', 'the daemon is probably dead',
     );
   } finally {
     conn.dispose();
@@ -149,4 +154,46 @@ describe('log rotation', () => {
     expect(readFileSync(logPath, 'utf8')).toBe('small');
     expect(() => statSync(`${logPath}.old`)).toThrow();
   });
+});
+
+describe('idle shutdown', () => {
+  it('exits once the last client leaves and nothing is running', async () => {
+    root = mkdtempSync(join(tmpdir(), 'agentflow-idle-'));
+    const started = await startDaemon(root, { AGENTFLOW_IDLE_SHUTDOWN_MS: '300' });
+    child = started.proc;
+
+    // Attaching and leaving is what disabling the extension looks like.
+    await handshake(started.endpoint, root);
+
+    const exited = await withTimeout(
+      new Promise<number | null>((res) => started.proc.once('exit', (code) => res(code))),
+      10_000, 'idle exit', 'the daemon is still up and should not be',
+    );
+    expect(exited).toBe(0);
+    // The lock must go with it, or the next window attaches to a corpse.
+    expect(existsSync(workspacePaths(root).lockFile)).toBe(false);
+  }, 30_000);
+
+  it('stays up while a client is attached', async () => {
+    root = mkdtempSync(join(tmpdir(), 'agentflow-idle-'));
+    const started = await startDaemon(root, { AGENTFLOW_IDLE_SHUTDOWN_MS: '300' });
+    child = started.proc;
+
+    const socket = connect(started.endpoint);
+    await new Promise<void>((res, rej) => {
+      socket.once('connect', res);
+      socket.once('error', rej);
+    });
+    const conn = createMessageConnection(new SocketMessageReader(socket), new SocketMessageWriter(socket));
+    conn.listen();
+    await conn.sendRequest(Methods.handshake, {
+      protocolVersion: PROTOCOL_VERSION, workspaceRoot: root, clientId: 'held-open',
+    });
+
+    await new Promise((r) => setTimeout(r, 1_500));
+    expect(started.proc.exitCode).toBeNull();
+
+    conn.dispose();
+    socket.destroy();
+  }, 30_000);
 });

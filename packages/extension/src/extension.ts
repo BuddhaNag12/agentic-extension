@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import { join } from 'node:path';
+import { workspacePaths } from '@agentflow/orchestrator';
+import { shouldAutoStart } from './autoStart.js';
 import type { PendingChangedNotification, PipelineProfile, Run } from '@agentflow/protocol';
 import { OrchestratorClient } from './client/orchestratorClient.js';
 import { RunsTreeProvider } from './views/runsTree.js';
@@ -192,7 +194,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  if (vscode.workspace.getConfiguration('agentflow').get<boolean>('orchestrator.autoStart', true)) {
+  const paths = workspacePaths(workspace.uri.fsPath);
+  const autoStart = vscode.workspace
+    .getConfiguration('agentflow')
+    .get<boolean>('orchestrator.autoStart', true);
+
+  if (shouldAutoStart(paths, autoStart)) {
     try {
       await client.ensureConnected();
       await Promise.all([runsTree.refresh(), inbox.refresh(), statusBar.reload()]);
